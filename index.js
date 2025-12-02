@@ -19,7 +19,20 @@ mongoose.connect(MONGODB_URI)
 
 // --- Schemas & Models ---
 
-// Payment Schema
+// 1. User Schema (Synced from Firebase)
+const userSchema = new mongoose.Schema({
+  uid: { type: String, required: true, unique: true },
+  email: String,
+  displayName: String,
+  photoURL: String,
+  role: { type: String, default: 'student' }, // student, admin
+  lastLogin: { type: Number, default: Date.now },
+  createdAt: { type: Number, default: Date.now }
+});
+
+const User = mongoose.model('User', userSchema);
+
+// 2. Payment Schema
 const paymentSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   userName: String,
@@ -35,7 +48,7 @@ const paymentSchema = new mongoose.Schema({
 
 const Payment = mongoose.model('Payment', paymentSchema);
 
-// Notification Schema
+// 3. Notification Schema
 const notificationSchema = new mongoose.Schema({
   title: String,
   message: String,
@@ -52,7 +65,55 @@ app.get('/', (req, res) => {
   res.send('🚀 Shikkha Shohayok API is Running!');
 });
 
-// 1. Submit Payment Request
+// --- USER ROUTES ---
+
+// Sync User (Upsert: Create if new, Update if exists)
+app.post('/api/users/sync', async (req, res) => {
+  try {
+    const { uid, email, displayName, photoURL } = req.body;
+    
+    const user = await User.findOneAndUpdate(
+      { uid: uid },
+      { 
+        uid, 
+        email, 
+        displayName, 
+        photoURL, 
+        lastLogin: Date.now() 
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    
+    res.json(user);
+  } catch (error) {
+    console.error("User Sync Error:", error);
+    res.status(500).json({ error: 'Failed to sync user' });
+  }
+});
+
+// Get User Enrollments (Based on Approved Payments)
+app.get('/api/users/:userId/enrollments', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    // Find all approved payments for this user
+    const approvedPayments = await Payment.find({ userId: userId, status: 'APPROVED' });
+    
+    // Map to simple enrollment objects
+    const enrollments = approvedPayments.map(p => ({
+      id: p.courseId,
+      title: p.courseTitle,
+      progress: 0 // In future, we can have a separate Enrollment schema for tracking progress
+    }));
+
+    res.json(enrollments);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch enrollments' });
+  }
+});
+
+// --- PAYMENT ROUTES ---
+
+// Submit Payment Request
 app.post('/api/payments', async (req, res) => {
   try {
     const newPayment = new Payment(req.body);
@@ -63,10 +124,9 @@ app.post('/api/payments', async (req, res) => {
   }
 });
 
-// 2. Get All Payments (Admin)
+// Get All Payments (Admin)
 app.get('/api/admin/payments', async (req, res) => {
   try {
-    // Sort by latest first
     const payments = await Payment.find().sort({ timestamp: -1 });
     res.json(payments);
   } catch (error) {
@@ -74,7 +134,7 @@ app.get('/api/admin/payments', async (req, res) => {
   }
 });
 
-// 3. Update Payment Status (Approve/Reject)
+// Update Payment Status
 app.put('/api/admin/payments/:id', async (req, res) => {
   try {
     const { status } = req.body;
@@ -95,7 +155,7 @@ app.put('/api/admin/payments/:id', async (req, res) => {
   }
 });
 
-// 4. Delete Payment Request
+// Delete Payment Request
 app.delete('/api/admin/payments/:id', async (req, res) => {
   try {
     await Payment.findByIdAndDelete(req.params.id);
@@ -105,7 +165,9 @@ app.delete('/api/admin/payments/:id', async (req, res) => {
   }
 });
 
-// 5. Send Notification
+// --- NOTIFICATION ROUTES ---
+
+// Send Notification
 app.post('/api/admin/notifications', async (req, res) => {
   try {
     const newNotif = new Notification(req.body);
@@ -116,7 +178,7 @@ app.post('/api/admin/notifications', async (req, res) => {
   }
 });
 
-// 6. Get Notifications (For Users)
+// Get Notifications
 app.get('/api/notifications', async (req, res) => {
   try {
     const notifs = await Notification.find().sort({ date: -1 }).limit(20);
