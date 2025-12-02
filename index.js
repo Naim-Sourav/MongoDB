@@ -18,7 +18,8 @@ const memoryDb = {
   payments: [],
   notifications: [
     { _id: '1', title: 'System', message: 'Running in fallback mode (Database disconnected)', type: 'WARNING', date: Date.now() }
-  ]
+  ],
+  battles: []
 };
 
 // Connect to MongoDB
@@ -66,6 +67,46 @@ const notificationSchema = new mongoose.Schema({
   target: { type: String, default: 'ALL' }
 });
 const Notification = mongoose.model('Notification', notificationSchema);
+
+const battleSchema = new mongoose.Schema({
+  roomId: { type: String, required: true, unique: true },
+  createdAt: { type: Number, default: Date.now },
+  status: { type: String, enum: ['WAITING', 'ACTIVE', 'FINISHED'], default: 'WAITING' },
+  startTime: Number, // When status becomes ACTIVE
+  questions: Array, // Array of QuizQuestion
+  player1: {
+    uid: String,
+    name: String,
+    score: { type: Number, default: 0 },
+    avatar: String
+  },
+  player2: {
+    uid: String,
+    name: String,
+    score: { type: Number, default: 0 },
+    avatar: String
+  }
+});
+const Battle = mongoose.model('Battle', battleSchema);
+
+// --- BATTLE QUESTION POOL (Static for Prototype) ---
+const BATTLE_QUESTIONS = [
+  { question: "নিচের কোনটি ভেক্টর রাশি?", options: ["কাজ", "শক্তি", "বেগ", "তাপমাত্রা"], correctAnswerIndex: 2 },
+  { question: "পানির রাসায়নিক সংকেত কোনটি?", options: ["HO2", "H2O", "H2O2", "OH"], correctAnswerIndex: 1 },
+  { question: "নিউটনের গতির সূত্র কয়টি?", options: ["২টি", "৩টি", "৪টি", "৫টি"], correctAnswerIndex: 1 },
+  { question: "DNA এর পূর্ণরূপ কী?", options: ["Deoxyribonucleic Acid", "Dyno Acid", "Dual Acid", "None"], correctAnswerIndex: 0 },
+  { question: "কোষের পাওয়ার হাউস কোনটি?", options: ["নিউক্লিয়াস", "মাইটোকন্ড্রিয়া", "প্লাস্টিড", "রাইবোজোম"], correctAnswerIndex: 1 },
+  { question: "বাংলাদেশের জাতীয় ফুল কোনটি?", options: ["গোলাপ", "শাপলা", "জবা", "পদ্ম"], correctAnswerIndex: 1 },
+  { question: "কম্পিউটারের মস্তিষ্ক কোনটি?", options: ["Mouse", "Keyboard", "CPU", "Monitor"], correctAnswerIndex: 2 },
+  { question: "সর্বজনীন দাতা গ্রুপ কোনটি?", options: ["A+", "B+", "AB+", "O-"], correctAnswerIndex: 3 },
+  { question: "আলোর বেগ কত (m/s)?", options: ["3x10^6", "3x10^8", "3x10^10", "3x10^5"], correctAnswerIndex: 1 },
+  { question: "মানুষের শরীরে ক্রোমোজোম সংখ্যা কত?", options: ["23 জোড়া", "22 জোড়া", "20 জোড়া", "24 জোড়া"], correctAnswerIndex: 0 }
+];
+
+const getRandomQuestions = (count) => {
+  const shuffled = [...BATTLE_QUESTIONS].sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, count);
+};
 
 // --- Routes ---
 
@@ -224,6 +265,118 @@ app.get('/api/notifications', async (req, res) => {
     }
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+// --- BATTLE ROUTES ---
+
+app.post('/api/battles/create', async (req, res) => {
+  try {
+    const { userId, userName, avatar } = req.body;
+    const roomId = Math.floor(100000 + Math.random() * 900000).toString(); // 6 Digit Code
+    const questions = getRandomQuestions(5); // 5 Questions Match
+
+    const battleData = {
+      roomId,
+      questions,
+      player1: { uid: userId, name: userName, score: 0, avatar },
+      player2: null,
+      status: 'WAITING'
+    };
+
+    if (isDbConnected()) {
+      const battle = new Battle(battleData);
+      await battle.save();
+      res.json({ roomId });
+    } else {
+      memoryDb.battles.push(battleData);
+      res.json({ roomId });
+    }
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to create battle' });
+  }
+});
+
+app.post('/api/battles/join', async (req, res) => {
+  try {
+    const { roomId, userId, userName, avatar } = req.body;
+
+    const updateData = {
+      player2: { uid: userId, name: userName, score: 0, avatar },
+      status: 'ACTIVE',
+      startTime: Date.now()
+    };
+
+    if (isDbConnected()) {
+      const battle = await Battle.findOneAndUpdate(
+        { roomId, status: 'WAITING' },
+        updateData,
+        { new: true }
+      );
+      if (!battle) return res.status(404).json({ error: 'Room not found or full' });
+      res.json({ success: true });
+    } else {
+      const battle = memoryDb.battles.find(b => b.roomId === roomId && b.status === 'WAITING');
+      if (!battle) return res.status(404).json({ error: 'Room not found or full' });
+      battle.player2 = updateData.player2;
+      battle.status = 'ACTIVE';
+      battle.startTime = updateData.startTime;
+      res.json({ success: true });
+    }
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to join battle' });
+  }
+});
+
+app.get('/api/battles/:roomId', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    let battle;
+    if (isDbConnected()) {
+      battle = await Battle.findOne({ roomId });
+    } else {
+      battle = memoryDb.battles.find(b => b.roomId === roomId);
+    }
+    
+    if (!battle) return res.status(404).json({ error: 'Battle not found' });
+    res.json(battle);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to fetch battle state' });
+  }
+});
+
+app.post('/api/battles/:roomId/answer', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const { userId, isCorrect } = req.body; // isCorrect logic handled on client for prototype simplicity
+    
+    // Increment 10 points for correct answer
+    const inc = isCorrect ? 10 : 0;
+    
+    if (isDbConnected()) {
+      // Need to check if user is p1 or p2 to update correct field
+      const battle = await Battle.findOne({ roomId });
+      if (!battle) return res.status(404).json({ error: 'Battle not found' });
+      
+      if (battle.player1.uid === userId) {
+         battle.player1.score += inc;
+      } else if (battle.player2 && battle.player2.uid === userId) {
+         battle.player2.score += inc;
+      }
+      await battle.save();
+      res.json({ success: true });
+    } else {
+      const battle = memoryDb.battles.find(b => b.roomId === roomId);
+      if (!battle) return res.status(404).json({ error: 'Battle not found' });
+       if (battle.player1.uid === userId) {
+         battle.player1.score += inc;
+      } else if (battle.player2 && battle.player2.uid === userId) {
+         battle.player2.score += inc;
+      }
+      res.json({ success: true });
+    }
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to submit answer' });
   }
 });
 
