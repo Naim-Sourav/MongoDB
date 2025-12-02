@@ -6,9 +6,9 @@ require('dotenv').config();
 const app = express();
 
 // Middleware
-// Increase limit for bulk uploads
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
+// Increase limit for bulk uploads to 50mb to handle large batches
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
 // --- MongoDB Connection Setup ---
@@ -97,7 +97,7 @@ const questionBankSchema = new mongoose.Schema({
   chapter: { type: String, required: true },
   topic: String,
   question: { type: String, required: true },
-  options: [{ type: String, required: true }], // Array of strings
+  options: { type: [String], required: true }, // Optimized array definition
   correctAnswerIndex: { type: Number, required: true },
   explanation: String,
   difficulty: { type: String, default: 'MEDIUM' },
@@ -264,11 +264,15 @@ app.post('/api/admin/questions/bulk', async (req, res) => {
     const { questions } = req.body; // Array of questions
     if (!Array.isArray(questions)) return res.status(400).json({ error: 'Invalid data format: Expected array of questions' });
 
+    console.log(`Received bulk upload request for ${questions.length} questions.`);
+
     if (isDbConnected()) {
-      // Use ordered: false to continue inserting other docs if one fails (optional, but good for bulk)
+      // Use insertMany for efficiency
       const savedQuestions = await QuestionBank.insertMany(questions, { ordered: false });
+      console.log('Successfully saved to MongoDB');
       return res.status(201).json(savedQuestions);
     } else {
+      console.log('Saving to In-Memory DB');
       const newQuestions = questions.map(q => ({ ...q, _id: 'q_' + Date.now() + Math.random() }));
       memoryDb.questions.push(...newQuestions);
       return res.status(201).json(newQuestions);
