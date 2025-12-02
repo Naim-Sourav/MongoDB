@@ -13,9 +13,21 @@ app.use(cors());
 // Render এ Environment Variable এ MONGODB_URI সেট করতে হবে
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://<username>:<password>@cluster0.mongodb.net/shikkha-shohayok?retryWrites=true&w=majority';
 
-mongoose.connect(MONGODB_URI)
+// Connect with timeouts to fail fast if config is wrong
+mongoose.connect(MONGODB_URI, {
+  serverSelectionTimeoutMS: 5000, // Fail after 5 seconds if cannot connect
+  socketTimeoutMS: 45000,
+})
   .then(() => console.log('✅ Connected to MongoDB Atlas'))
   .catch(err => console.error('❌ Could not connect to MongoDB:', err));
+
+// Middleware to check DB connection status before processing requests
+app.use((req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ error: 'Database not connected. Please try again later.' });
+  }
+  next();
+});
 
 // --- Schemas & Models ---
 
@@ -62,7 +74,8 @@ const Notification = mongoose.model('Notification', notificationSchema);
 // --- Routes ---
 
 app.get('/', (req, res) => {
-  res.send('🚀 Shikkha Shohayok API is Running!');
+  const dbStatus = mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected';
+  res.send(`🚀 Shikkha Shohayok API is Running! DB Status: ${dbStatus}`);
 });
 
 // --- USER ROUTES ---
