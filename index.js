@@ -19,7 +19,8 @@ const memoryDb = {
   notifications: [
     { _id: '1', title: 'System', message: 'Running in fallback mode (Database disconnected)', type: 'WARNING', date: Date.now() }
   ],
-  battles: []
+  battles: [],
+  questions: []
 };
 
 // Connect to MongoDB
@@ -88,6 +89,23 @@ const battleSchema = new mongoose.Schema({
   }
 });
 const Battle = mongoose.model('Battle', battleSchema);
+
+const questionBankSchema = new mongoose.Schema({
+  subject: { type: String, required: true },
+  chapter: { type: String, required: true },
+  topic: String,
+  question: { type: String, required: true },
+  options: [{ type: String, required: true }], // Array of strings
+  correctAnswerIndex: { type: Number, required: true },
+  explanation: String,
+  difficulty: { type: String, default: 'MEDIUM' },
+  createdAt: { type: Number, default: Date.now }
+});
+
+// Compound Index for extremely fast retrieval based on hierarchy
+questionBankSchema.index({ subject: 1, chapter: 1, topic: 1 });
+
+const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
 
 // --- BATTLE QUESTION POOL (Static for Prototype) ---
 const BATTLE_QUESTIONS = [
@@ -234,6 +252,67 @@ app.delete('/api/admin/payments/:id', async (req, res) => {
     res.json({ message: 'Payment deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete payment' });
+  }
+});
+
+// --- QUESTION BANK ROUTES ---
+
+app.post('/api/admin/questions/bulk', async (req, res) => {
+  try {
+    const { questions } = req.body; // Array of questions
+    if (!Array.isArray(questions)) return res.status(400).json({ error: 'Invalid data format' });
+
+    if (isDbConnected()) {
+      const savedQuestions = await QuestionBank.insertMany(questions);
+      return res.status(201).json(savedQuestions);
+    } else {
+      const newQuestions = questions.map(q => ({ ...q, _id: 'q_' + Date.now() + Math.random() }));
+      memoryDb.questions.push(...newQuestions);
+      return res.status(201).json(newQuestions);
+    }
+  } catch (error) {
+    console.error("Bulk Upload Error:", error);
+    res.status(500).json({ error: 'Failed to save questions' });
+  }
+});
+
+// High Performance Quiz Generation from DB
+app.post('/api/quiz/generate-from-db', async (req, res) => {
+  try {
+    const { subject, chapter, topics, count } = req.body;
+    const limit = parseInt(count) || 10;
+    
+    // Normalize topics to ensure array
+    const topicList = Array.isArray(topics) ? topics : [topics];
+
+    if (isDbConnected()) {
+      // Use Aggregation Pipeline for efficient random sampling
+      const pipeline = [
+        { 
+          $match: { 
+            subject: subject, 
+            chapter: chapter,
+            topic: { $in: topicList } 
+          } 
+        },
+        { $sample: { size: limit } }
+      ];
+
+      const questions = await QuestionBank.aggregate(pipeline);
+      return res.json(questions);
+    } else {
+      // Fallback for memory mode
+      const filtered = memoryDb.questions.filter(q => 
+        q.subject === subject && 
+        q.chapter === chapter && 
+        topicList.includes(q.topic)
+      );
+      const shuffled = filtered.sort(() => 0.5 - Math.random());
+      return res.json(shuffled.slice(0, limit));
+    }
+  } catch (error) {
+    console.error("Quiz DB Generation Error:", error);
+    res.status(500).json({ error: 'Failed to generate quiz from database' });
   }
 });
 
