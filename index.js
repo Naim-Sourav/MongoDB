@@ -6,7 +6,9 @@ require('dotenv').config();
 const app = express();
 
 // Middleware
-app.use(express.json());
+// Increase limit for bulk uploads
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 app.use(cors());
 
 // --- MongoDB Connection Setup ---
@@ -260,10 +262,11 @@ app.delete('/api/admin/payments/:id', async (req, res) => {
 app.post('/api/admin/questions/bulk', async (req, res) => {
   try {
     const { questions } = req.body; // Array of questions
-    if (!Array.isArray(questions)) return res.status(400).json({ error: 'Invalid data format' });
+    if (!Array.isArray(questions)) return res.status(400).json({ error: 'Invalid data format: Expected array of questions' });
 
     if (isDbConnected()) {
-      const savedQuestions = await QuestionBank.insertMany(questions);
+      // Use ordered: false to continue inserting other docs if one fails (optional, but good for bulk)
+      const savedQuestions = await QuestionBank.insertMany(questions, { ordered: false });
       return res.status(201).json(savedQuestions);
     } else {
       const newQuestions = questions.map(q => ({ ...q, _id: 'q_' + Date.now() + Math.random() }));
@@ -271,8 +274,8 @@ app.post('/api/admin/questions/bulk', async (req, res) => {
       return res.status(201).json(newQuestions);
     }
   } catch (error) {
-    console.error("Bulk Upload Error:", error);
-    res.status(500).json({ error: 'Failed to save questions' });
+    console.error("Bulk Upload Error:", error.message);
+    res.status(500).json({ error: 'Failed to save questions', details: error.message });
   }
 });
 
