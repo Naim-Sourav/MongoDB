@@ -110,10 +110,18 @@ questionBankSchema.index({ subject: 1, chapter: 1, topic: 1 });
 
 const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
 
-// Saved Question Schema (Optimized: Stores Reference ID only)
+// Saved Question Schema (User Specific)
 const savedQuestionSchema = new mongoose.Schema({
   userId: { type: String, required: true },
-  questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'QuestionBank', required: true },
+  questionData: {
+    question: String,
+    options: [String],
+    correctAnswerIndex: Number,
+    explanation: String,
+    subject: String,
+    chapter: String,
+    topic: String
+  },
   savedAt: { type: Number, default: Date.now }
 });
 savedQuestionSchema.index({ userId: 1 });
@@ -205,41 +213,40 @@ app.get('/api/users/:userId/enrollments', async (req, res) => {
 app.post('/api/users/:userId/saved-questions', async (req, res) => {
   try {
     const { userId } = req.params;
-    const { questionId } = req.body; // Expecting ObjectId string
-
-    if (!questionId) return res.status(400).json({ error: "questionId is required" });
+    const { questionData } = req.body; // Full question object
 
     if (isDbConnected()) {
-      // Check if already saved
-      const existing = await SavedQuestion.findOne({ userId, questionId });
+      // Check if already saved (based on question text to avoid duplicates)
+      const existing = await SavedQuestion.findOne({ 
+        userId, 
+        'questionData.question': questionData.question 
+      });
 
       if (existing) {
-        // Toggle: If exists, remove it
+        // If exists, treat as toggle -> delete it (Unsave)
         await SavedQuestion.deleteOne({ _id: existing._id });
         return res.json({ status: 'removed' });
       } else {
-        // Save new ref
-        const newSaved = new SavedQuestion({ userId, questionId });
+        // Save new
+        const newSaved = new SavedQuestion({ userId, questionData });
         await newSaved.save();
         return res.json({ status: 'saved' });
       }
     } else {
-      // Memory fallback (Simplified)
+      // Memory fallback
       const existingIdx = memoryDb.savedQuestions.findIndex(sq => 
-        sq.userId === userId && sq.questionId === questionId
+        sq.userId === userId && sq.questionData.question === questionData.question
       );
 
       if (existingIdx > -1) {
         memoryDb.savedQuestions.splice(existingIdx, 1);
         return res.json({ status: 'removed' });
       } else {
-        // Look up question in memory to ensure it exists (optional)
-        memoryDb.savedQuestions.push({ _id: 'sq_'+Date.now(), userId, questionId, savedAt: Date.now() });
+        memoryDb.savedQuestions.push({ _id: 'sq_'+Date.now(), userId, questionData, savedAt: Date.now() });
         return res.json({ status: 'saved' });
       }
     }
   } catch (error) {
-    console.error("Save Error:", error);
     res.status(500).json({ error: 'Failed to toggle saved question' });
   }
 });
@@ -248,28 +255,13 @@ app.get('/api/users/:userId/saved-questions', async (req, res) => {
   try {
     const { userId } = req.params;
     if (isDbConnected()) {
-      // Populate the referenced question data
-      const saved = await SavedQuestion.find({ userId })
-        .populate('questionId')
-        .sort({ savedAt: -1 });
-      
-      // Filter out any where the referenced question might have been deleted (null)
-      const validSaved = saved.filter(s => s.questionId !== null);
-      
-      res.json(validSaved);
+      const saved = await SavedQuestion.find({ userId }).sort({ savedAt: -1 });
+      res.json(saved);
     } else {
-      // Memory fallback logic needs manual population simulation
       const saved = memoryDb.savedQuestions.filter(sq => sq.userId === userId);
-      // Simulate populate by finding q in memoryDb.questions
-      const populated = saved.map(s => {
-         const q = memoryDb.questions.find(q => q._id === s.questionId) || memoryDb.questions.find(q => q.question === s.questionId); // fallback logic
-         return { ...s, questionId: q };
-      }).filter(s => s.questionId);
-      
-      res.json(populated);
+      res.json(saved);
     }
   } catch (error) {
-    console.error("Fetch Saved Error:", error);
     res.status(500).json({ error: 'Failed to fetch saved questions' });
   }
 });
