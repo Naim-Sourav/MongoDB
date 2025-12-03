@@ -22,7 +22,8 @@ const memoryDb = {
     { _id: '1', title: 'System', message: 'Running in fallback mode (Database disconnected)', type: 'WARNING', date: Date.now() }
   ],
   battles: [],
-  questions: []
+  questions: [],
+  savedQuestions: []
 };
 
 // Connect to MongoDB
@@ -109,6 +110,24 @@ questionBankSchema.index({ subject: 1, chapter: 1, topic: 1 });
 
 const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
 
+// Saved Question Schema (User Specific)
+const savedQuestionSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  questionData: {
+    question: String,
+    options: [String],
+    correctAnswerIndex: Number,
+    explanation: String,
+    subject: String,
+    chapter: String,
+    topic: String
+  },
+  savedAt: { type: Number, default: Date.now }
+});
+savedQuestionSchema.index({ userId: 1 });
+const SavedQuestion = mongoose.model('SavedQuestion', savedQuestionSchema);
+
+
 // --- BATTLE QUESTION POOL (Static for Prototype) ---
 const BATTLE_QUESTIONS = [
   { question: "নিচের কোনটি ভেক্টর রাশি?", options: ["কাজ", "শক্তি", "বেগ", "তাপমাত্রা"], correctAnswerIndex: 2 },
@@ -189,6 +208,78 @@ app.get('/api/users/:userId/enrollments', async (req, res) => {
   }
 });
 
+// --- SAVED QUESTIONS ROUTES ---
+
+app.post('/api/users/:userId/saved-questions', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { questionData } = req.body; // Full question object
+
+    if (isDbConnected()) {
+      // Check if already saved (based on question text to avoid duplicates)
+      const existing = await SavedQuestion.findOne({ 
+        userId, 
+        'questionData.question': questionData.question 
+      });
+
+      if (existing) {
+        // If exists, treat as toggle -> delete it (Unsave)
+        await SavedQuestion.deleteOne({ _id: existing._id });
+        return res.json({ status: 'removed' });
+      } else {
+        // Save new
+        const newSaved = new SavedQuestion({ userId, questionData });
+        await newSaved.save();
+        return res.json({ status: 'saved' });
+      }
+    } else {
+      // Memory fallback
+      const existingIdx = memoryDb.savedQuestions.findIndex(sq => 
+        sq.userId === userId && sq.questionData.question === questionData.question
+      );
+
+      if (existingIdx > -1) {
+        memoryDb.savedQuestions.splice(existingIdx, 1);
+        return res.json({ status: 'removed' });
+      } else {
+        memoryDb.savedQuestions.push({ _id: 'sq_'+Date.now(), userId, questionData, savedAt: Date.now() });
+        return res.json({ status: 'saved' });
+      }
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to toggle saved question' });
+  }
+});
+
+app.get('/api/users/:userId/saved-questions', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (isDbConnected()) {
+      const saved = await SavedQuestion.find({ userId }).sort({ savedAt: -1 });
+      res.json(saved);
+    } else {
+      const saved = memoryDb.savedQuestions.filter(sq => sq.userId === userId);
+      res.json(saved);
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch saved questions' });
+  }
+});
+
+app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
+  try {
+    if (isDbConnected()) {
+      await SavedQuestion.findByIdAndDelete(req.params.id);
+    } else {
+      memoryDb.savedQuestions = memoryDb.savedQuestions.filter(sq => sq._id !== req.params.id);
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete saved question' });
+  }
+});
+
+
 // --- PAYMENT ROUTES ---
 
 app.post('/api/payments', async (req, res) => {
@@ -267,15 +358,28 @@ app.post('/api/admin/questions/bulk', async (req, res) => {
     console.log(`Received bulk upload request for ${questions.length} questions.`);
 
     if (isDbConnected()) {
-      // Use insertMany for efficiency
-      const savedQuestions = await QuestionBank.insertMany(questions, { ordered: false });
-      console.log('Successfully saved to MongoDB');
-      return res.status(201).json(savedQuestions);
+      // Use bulkWrite with upsert to prevent duplicates based on question text
+      const operations = questions.map(q => ({
+        updateOne: {
+          filter: { question: q.question, subject: q.subject }, // Identifier
+          update: { $set: q },
+          upsert: true
+        }
+      }));
+
+      await QuestionBank.bulkWrite(operations);
+      console.log('Successfully saved/updated questions in MongoDB');
+      return res.status(201).json({ message: 'Bulk write successful' });
     } else {
       console.log('Saving to In-Memory DB');
-      const newQuestions = questions.map(q => ({ ...q, _id: 'q_' + Date.now() + Math.random() }));
-      memoryDb.questions.push(...newQuestions);
-      return res.status(201).json(newQuestions);
+      // Simple loop check for memory db
+      questions.forEach(q => {
+        const exists = memoryDb.questions.find(mq => mq.question === q.question);
+        if (!exists) {
+           memoryDb.questions.push({ ...q, _id: 'q_' + Date.now() + Math.random() });
+        }
+      });
+      return res.status(201).json({ message: 'Saved to memory' });
     }
   } catch (error) {
     console.error("Bulk Upload Error:", error.message);
