@@ -158,6 +158,45 @@ app.get('/', (req, res) => {
   res.send(`🚀 Shikkha Shohayok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
 });
 
+// --- ADMIN STATS AGGREGATION ---
+app.get('/api/admin/stats', async (req, res) => {
+  try {
+    const stats = {
+        totalUsers: 0,
+        totalRevenue: 0,
+        totalQuestions: 0,
+        totalExams: 0,
+        pendingPayments: 0,
+        approvedEnrollments: 0
+    };
+
+    if (isDbConnected()) {
+        stats.totalUsers = await User.countDocuments();
+        stats.totalQuestions = await QuestionBank.countDocuments();
+        stats.totalExams = await ExamResult.countDocuments();
+        stats.pendingPayments = await Payment.countDocuments({ status: 'PENDING' });
+        stats.approvedEnrollments = await Payment.countDocuments({ status: 'APPROVED' });
+        
+        const revenueAgg = await Payment.aggregate([
+            { $match: { status: 'APPROVED' } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+        stats.totalRevenue = revenueAgg[0]?.total || 0;
+    } else {
+        // Memory Fallback
+        stats.totalUsers = memoryDb.users.length;
+        stats.totalQuestions = memoryDb.questions.length;
+        stats.totalExams = memoryDb.examResults.length;
+        stats.pendingPayments = memoryDb.payments.filter(p => p.status === 'PENDING').length;
+        stats.approvedEnrollments = memoryDb.payments.filter(p => p.status === 'APPROVED').length;
+        stats.totalRevenue = memoryDb.payments.filter(p => p.status === 'APPROVED').reduce((sum, p) => sum + (p.amount || 0), 0);
+    }
+    res.json(stats);
+  } catch (e) {
+      res.status(500).json({ error: 'Stats failed' });
+  }
+});
+
 // --- USER MANAGEMENT ---
 
 app.post('/api/users/sync', async (req, res) => {
