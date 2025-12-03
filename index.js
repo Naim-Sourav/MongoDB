@@ -11,7 +11,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
 // --- MongoDB Connection Setup ---
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://<username>:<password>@cluster0.mongodb.net/shikkha-shohayok?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://user:pass@cluster0.mongodb.net/shikkha-shohayok?retryWrites=true&w=majority';
 
 // In-Memory Fallback Storage
 const memoryDb = {
@@ -21,7 +21,7 @@ const memoryDb = {
     { _id: '1', title: 'System', message: 'Running in fallback mode (Database disconnected)', type: 'WARNING', date: Date.now() }
   ],
   battles: [],
-  questions: [],
+  questions: [], // Stores generated questions
   savedQuestions: [],
   examResults: []
 };
@@ -74,7 +74,6 @@ const notificationSchema = new mongoose.Schema({
 });
 const Notification = mongoose.model('Notification', notificationSchema);
 
-// Updated Battle Schema
 const battleSchema = new mongoose.Schema({
   roomId: { type: String, required: true, unique: true },
   hostId: String,
@@ -142,17 +141,15 @@ const BATTLE_QUESTIONS_FALLBACK = [
   { question: "কোষের পাওয়ার হাউস কোনটি?", options: ["নিউক্লিয়াস", "মাইটোকন্ড্রিয়া", "প্লাস্টিড", "রাইবোজোম"], correctAnswerIndex: 1, subject: "Biology" }
 ];
 
-// --- Routes ---
+// --- ROUTES ---
 
 app.get('/', (req, res) => {
   res.send(`🚀 Shikkha Shohayok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
 });
 
-// ... (User, Payment, Notification, QuestionBank Routes remain same - skipping for brevity, they should be preserved)
-// RE-INCLUDING ESSENTIAL ROUTES TO ENSURE FILE INTEGRITY
+// --- USER MANAGEMENT ---
 
 app.post('/api/users/sync', async (req, res) => {
-  /* ... existing user sync logic ... */
   try {
     const { uid, email, displayName, photoURL } = req.body;
     if (isDbConnected()) {
@@ -166,11 +163,359 @@ app.post('/api/users/sync', async (req, res) => {
   } catch (e) { res.status(500).json({error: 'Sync failed'}); }
 });
 
-app.get('/api/users/:userId/stats', async (req, res) => { /* ... existing stats logic ... */ 
-    res.json({ points: 100, totalExams: 5 }); // Simplified for brevity in this update block
+app.get('/api/users/:userId/enrollments', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    let enrollments = [];
+    
+    if (isDbConnected()) {
+        const payments = await Payment.find({ userId, status: 'APPROVED' });
+        enrollments = payments.map(p => ({ id: p.courseId, title: p.courseTitle, progress: 0 }));
+    } else {
+        const payments = memoryDb.payments.filter(p => p.userId === userId && p.status === 'APPROVED');
+        enrollments = payments.map(p => ({ id: p.courseId, title: p.courseTitle, progress: 0 }));
+    }
+    res.json(enrollments);
+  } catch (e) { res.status(500).json({ error: 'Fetch enrollments failed' }); }
 });
 
-// --- BATTLE ROUTES UPDATED ---
+app.get('/api/users/:userId/stats', async (req, res) => {
+    const { userId } = req.params;
+    try {
+        if (isDbConnected()) {
+            const user = await User.findOne({ uid: userId });
+            const results = await ExamResult.find({ userId });
+            
+            // Calc stats
+            const totalCorrect = results.reduce((acc, r) => acc + r.correct, 0);
+            const totalWrong = results.reduce((acc, r) => acc + r.wrong, 0);
+            
+            // Analyze subjects
+            const subjMap = {};
+            results.forEach(r => {
+                if (!subjMap[r.subject]) subjMap[r.subject] = { correct: 0, total: 0 };
+                subjMap[r.subject].correct += r.correct;
+                subjMap[r.subject].total += r.totalQuestions;
+            });
+            
+            const subjectBreakdown = Object.keys(subjMap).map(s => ({
+                subject: s,
+                accuracy: (subjMap[s].correct / subjMap[s].total) * 100
+            }));
+            
+            subjectBreakdown.sort((a,b) => b.accuracy - a.accuracy);
+
+            res.json({
+                points: user ? user.points : 0,
+                totalExams: results.length,
+                totalCorrect,
+                totalWrong,
+                subjectBreakdown,
+                strongestSubject: subjectBreakdown[0],
+                weakestSubject: subjectBreakdown[subjectBreakdown.length - 1]
+            });
+        } else {
+            const user = memoryDb.users.find(u => u.uid === userId);
+            res.json({ points: user ? user.points : 0, totalExams: 0, subjectBreakdown: [] });
+        }
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.post('/api/users/:userId/exam-results', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const resultData = { userId, ...req.body, timestamp: Date.now() };
+        
+        if (isDbConnected()) {
+            await new ExamResult(resultData).save();
+            // Update User Points
+            const pointsToAdd = (resultData.correct * 10) + 20; // 10 per correct, 20 bonus for finish
+            await User.findOneAndUpdate({ uid: userId }, { 
+                $inc: { points: pointsToAdd, totalExams: 1 } 
+            });
+        } else {
+            memoryDb.examResults.push(resultData);
+            const user = memoryDb.users.find(u => u.uid === userId);
+            if(user) {
+                user.points = (user.points || 0) + (resultData.correct * 10) + 20;
+            }
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- SAVED QUESTIONS ---
+
+app.get('/api/users/:userId/saved-questions', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (isDbConnected()) {
+            const saved = await SavedQuestion.find({ userId }).populate('questionId');
+            res.json(saved);
+        } else {
+            res.json(memoryDb.savedQuestions.filter(sq => sq.userId === userId));
+        }
+    } catch(e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.post('/api/users/:userId/saved-questions', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { questionId } = req.body;
+        
+        if (isDbConnected()) {
+            const exists = await SavedQuestion.findOne({ userId, questionId });
+            if (exists) {
+                await SavedQuestion.deleteOne({ userId, questionId });
+                res.json({ status: 'REMOVED' });
+            } else {
+                await new SavedQuestion({ userId, questionId }).save();
+                res.json({ status: 'SAVED' });
+            }
+        } else {
+            // Memory fallback incomplete for refs, simplified
+            res.json({ status: 'SAVED_MEMORY' });
+        }
+    } catch(e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (isDbConnected()) {
+            await SavedQuestion.findByIdAndDelete(id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- ADMIN PAYMENTS ---
+
+app.get('/api/admin/payments', async (req, res) => {
+  try {
+    if (isDbConnected()) {
+      const payments = await Payment.find().sort({ timestamp: -1 });
+      res.json(payments);
+    } else {
+      res.json(memoryDb.payments);
+    }
+  } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.post('/api/payments', async (req, res) => {
+  try {
+    const payment = req.body;
+    if (isDbConnected()) {
+      const newPayment = new Payment(payment);
+      await newPayment.save();
+      res.json(newPayment);
+    } else {
+      payment._id = Date.now().toString();
+      payment.status = 'PENDING';
+      payment.timestamp = Date.now();
+      memoryDb.payments.push(payment);
+      res.json(payment);
+    }
+  } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.put('/api/admin/payments/:id', async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (isDbConnected()) {
+      const payment = await Payment.findByIdAndUpdate(req.params.id, { status }, { new: true });
+      res.json(payment);
+    } else {
+      const payment = memoryDb.payments.find(p => p._id === req.params.id);
+      if (payment) payment.status = status;
+      res.json(payment);
+    }
+  } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.delete('/api/admin/payments/:id', async (req, res) => {
+  try {
+    if (isDbConnected()) {
+      await Payment.findByIdAndDelete(req.params.id);
+    } else {
+      memoryDb.payments = memoryDb.payments.filter(p => p._id !== req.params.id);
+    }
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- ADMIN NOTIFICATIONS ---
+
+app.get('/api/notifications', async (req, res) => {
+  try {
+    if (isDbConnected()) {
+      const notifs = await Notification.find().sort({ date: -1 }).limit(10);
+      res.json(notifs);
+    } else {
+      res.json(memoryDb.notifications);
+    }
+  } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.post('/api/admin/notifications', async (req, res) => {
+  try {
+    if (isDbConnected()) {
+      const notif = new Notification(req.body);
+      await notif.save();
+      res.json(notif);
+    } else {
+      const notif = { ...req.body, _id: Date.now().toString(), date: Date.now() };
+      memoryDb.notifications.unshift(notif);
+      res.json(notif);
+    }
+  } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- LEADERBOARD ---
+
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const users = await User.find().sort({ points: -1 }).limit(50);
+            res.json(users);
+        } else {
+            res.json(memoryDb.users.sort((a,b) => (b.points||0) - (a.points||0)));
+        }
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- QUESTION BANK & SYLLABUS STATS ---
+
+app.get('/api/quiz/syllabus-stats', async (req, res) => {
+    try {
+        let stats = {};
+        
+        if (isDbConnected()) {
+            // Aggregation pipeline to count questions per subject/chapter/topic
+            const agg = await QuestionBank.aggregate([
+                {
+                    $group: {
+                        _id: { subject: "$subject", chapter: "$chapter", topic: "$topic" },
+                        count: { $sum: 1 }
+                    }
+                }
+            ]);
+
+            // Transform aggregation result to nested structure
+            agg.forEach(item => {
+                const { subject, chapter, topic } = item._id;
+                const count = item.count;
+
+                if (!stats[subject]) stats[subject] = { total: 0, chapters: {} };
+                stats[subject].total += count;
+
+                if (!stats[subject].chapters[chapter]) stats[subject].chapters[chapter] = { total: 0, topics: {} };
+                stats[subject].chapters[chapter].total += count;
+
+                if (topic) {
+                    stats[subject].chapters[chapter].topics[topic] = count;
+                }
+            });
+        } else {
+            // Memory Fallback
+            memoryDb.questions.forEach(q => {
+                const { subject, chapter, topic } = q;
+                if (!stats[subject]) stats[subject] = { total: 0, chapters: {} };
+                stats[subject].total++;
+                if (!stats[subject].chapters[chapter]) stats[subject].chapters[chapter] = { total: 0, topics: {} };
+                stats[subject].chapters[chapter].total++;
+                if (topic) stats[subject].chapters[chapter].topics[topic] = (stats[subject].chapters[chapter].topics[topic] || 0) + 1;
+            });
+        }
+        
+        res.json(stats);
+    } catch (e) {
+        console.error("Stats Error:", e);
+        res.status(500).json({ error: 'Failed to fetch stats' });
+    }
+});
+
+app.post('/api/admin/questions/bulk', async (req, res) => {
+  try {
+    const { questions } = req.body;
+    if (isDbConnected()) {
+      const ops = questions.map(q => ({
+        updateOne: {
+          filter: { question: q.question }, // Avoid duplicates by question text
+          update: { $set: q },
+          upsert: true
+        }
+      }));
+      await QuestionBank.bulkWrite(ops);
+    } else {
+      memoryDb.questions.push(...questions);
+    }
+    res.json({ success: true });
+  } catch (e) { 
+      console.error(e);
+      res.status(500).json({ error: e.message }); 
+  }
+});
+
+app.get('/api/admin/questions', async (req, res) => {
+    try {
+        const { page = 1, limit = 10, subject, chapter } = req.query;
+        const query = {};
+        if (subject) query.subject = subject;
+        if (chapter) query.chapter = chapter;
+
+        if (isDbConnected()) {
+            const questions = await QuestionBank.find(query)
+                .sort({ createdAt: -1 })
+                .skip((page - 1) * limit)
+                .limit(parseInt(limit));
+            const total = await QuestionBank.countDocuments(query);
+            res.json({ questions, total });
+        } else {
+            res.json({ questions: memoryDb.questions.slice(0, 10), total: memoryDb.questions.length });
+        }
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.delete('/api/admin/questions/:id', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            await QuestionBank.findByIdAndDelete(req.params.id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: 'Failed'}); }
+});
+
+app.post('/api/quiz/generate-from-db', async (req, res) => {
+    try {
+        const { subject, chapter, topics, count } = req.body;
+        
+        if (isDbConnected()) {
+            const pipeline = [
+                { 
+                    $match: { 
+                        subject, 
+                        chapter,
+                        topic: { $in: topics }
+                    } 
+                },
+                { $sample: { size: count } }
+            ];
+            const questions = await QuestionBank.aggregate(pipeline);
+            res.json(questions);
+        } else {
+            // Simple memory filter
+            const filtered = memoryDb.questions.filter(q => 
+                q.subject === subject && 
+                q.chapter === chapter && 
+                topics.includes(q.topic)
+            );
+            res.json(filtered.slice(0, count));
+        }
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- BATTLE ROUTES ---
 
 app.post('/api/battles/create', async (req, res) => {
   try {
@@ -228,14 +573,11 @@ app.post('/api/battles/join', async (req, res) => {
     if (!battle) return res.status(404).json({ error: 'Room not found' });
     if (battle.status !== 'WAITING') return res.status(400).json({ error: 'Game already started' });
 
-    // Check Limits
     const limit = battle.config.mode === '1v1' ? 2 : battle.config.mode === '2v2' ? 4 : 5;
     if (battle.players.length >= limit) return res.status(400).json({ error: 'Room is full' });
 
-    // Check if already joined
     const exists = battle.players.find(p => p.uid === userId);
     if (!exists) {
-        // Assign Team for 2v2
         let team = 'NONE';
         if (battle.config.mode === '2v2') {
             const teamA = battle.players.filter(p => p.team === 'A').length;
@@ -263,7 +605,6 @@ app.post('/api/battles/start', async (req, res) => {
     try {
         const { roomId, userId } = req.body;
         
-        // Only host can start
         let battle;
         if (isDbConnected()) {
             battle = await Battle.findOne({ roomId });
@@ -309,7 +650,6 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
   try {
     const { roomId } = req.params;
     const { userId, isCorrect } = req.body;
-    
     const inc = isCorrect ? 10 : 0;
     
     if (isDbConnected()) {
@@ -321,9 +661,6 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
           battle.players[playerIndex].score += inc;
           await battle.save();
       }
-      
-      // If game over, award points to winner profile (Simplified logic)
-      
       res.json({ success: true });
     } else {
       const battle = memoryDb.battles.find(b => b.roomId === roomId);
