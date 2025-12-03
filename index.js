@@ -23,7 +23,53 @@ const memoryDb = {
   battles: [],
   questions: [],
   savedQuestions: [],
-  examResults: []
+  examResults: [],
+  examPacks: [
+    {
+      id: 'med-final-24',
+      title: 'মেডিকেল ফাইনাল মডেল টেস্ট',
+      subtitle: 'শেষ মুহূর্তের পূর্ণাঙ্গ প্রস্তুতি (১০০টি মডেল টেস্ট)',
+      price: 500,
+      originalPrice: 1500,
+      totalExams: 100,
+      features: ['সম্পূর্ণ সিলেবাসের ওপর পরীক্ষা', 'নেগেটিভ মার্কিং প্র্যাকটিস', 'মেডিকেল স্ট্যান্ডার্ড প্রশ্ন', 'সলভ শিট ও ব্যাখ্যা'],
+      theme: 'emerald',
+      tag: 'Best Seller'
+    },
+    {
+      id: 'eng-qbank-solve',
+      title: 'ইঞ্জিনিয়ারিং প্রশ্ন ব্যাংক সলভ',
+      subtitle: 'বুয়েট, চুয়েট, কুয়েট, রুয়েট বিগত ২০ বছরের প্রশ্ন',
+      price: 750,
+      originalPrice: 2000,
+      totalExams: 50,
+      features: ['অধ্যায়ভিত্তিক এক্সাম', 'কঠিন প্রশ্নের সহজ সমাধান', 'শর্টকাট টেকনিক', 'আনলিমিটেড এটেম্পট'],
+      theme: 'blue',
+      tag: 'Premium'
+    },
+    {
+      id: 'hsc-test-paper',
+      title: 'HSC 24 টেস্ট পেপার সলভ',
+      subtitle: 'শীর্ষ কলেজসমূহের টেস্ট পরীক্ষার প্রশ্ন সমাধান',
+      price: 350,
+      originalPrice: 1000,
+      totalExams: 40,
+      features: ['নটরডেম, ভিকারুননিসা, হলিক্রস কলেজের প্রশ্ন', 'সৃজনশীল ও বহুনির্বাচনী', 'বোর্ড স্ট্যান্ডার্ড মানবন্টন'],
+      theme: 'purple',
+      tag: 'HSC Special'
+    },
+    {
+      id: 'varsity-ka-boost',
+      title: 'ভার্সিটি ক-ইউনিট বুস্টার',
+      subtitle: 'ঢাবি, জাবি, রাবি ও গুচ্ছ প্রস্তুতির সেরা প্যাক',
+      price: 450,
+      originalPrice: 1200,
+      totalExams: 60,
+      features: ['টাইম ম্যানেজমেন্ট প্র্যাকটিস', 'বিষয়ভিত্তিক মডেল টেস্ট', 'পূর্ণাঙ্গ মডেল টেস্ট', 'লাইভ লিডারবোর্ড'],
+      theme: 'orange',
+      tag: 'Popular'
+    }
+  ]
 };
 
 // Connect to MongoDB
@@ -142,6 +188,19 @@ const examResultSchema = new mongoose.Schema({
 });
 examResultSchema.index({ userId: 1 });
 const ExamResult = mongoose.model('ExamResult', examResultSchema);
+
+const examPackSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  title: String,
+  subtitle: String,
+  price: Number,
+  originalPrice: Number,
+  totalExams: Number,
+  features: [String],
+  theme: String,
+  tag: String
+});
+const ExamPack = mongoose.model('ExamPack', examPackSchema);
 
 // Static Question Pool for Fallback
 const BATTLE_QUESTIONS_FALLBACK = [
@@ -477,6 +536,23 @@ app.get('/api/leaderboard', async (req, res) => {
             res.json(users);
         } else {
             res.json(memoryDb.users.sort((a,b) => (b.points||0) - (a.points||0)));
+        }
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- EXAM PACKS ---
+app.get('/api/exam-packs', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const packs = await ExamPack.find();
+            // If DB is empty, insert defaults
+            if (packs.length === 0) {
+               await ExamPack.insertMany(memoryDb.examPacks);
+               return res.json(memoryDb.examPacks);
+            }
+            res.json(packs);
+        } else {
+            res.json(memoryDb.examPacks);
         }
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
