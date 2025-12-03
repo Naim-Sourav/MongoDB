@@ -502,6 +502,53 @@ app.post('/api/admin/questions/bulk', async (req, res) => {
   }
 });
 
+// Fetch Questions for Admin (with Pagination and Filters)
+app.get('/api/admin/questions', async (req, res) => {
+  try {
+    const { page = 1, limit = 20, subject, chapter } = req.query;
+    const skip = (page - 1) * limit;
+    const query = {};
+    if (subject) query.subject = subject;
+    if (chapter) query.chapter = chapter;
+
+    if (isDbConnected()) {
+      const questions = await QuestionBank.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit));
+        
+      const total = await QuestionBank.countDocuments(query);
+      
+      res.json({ questions, total, page: parseInt(page), pages: Math.ceil(total / limit) });
+    } else {
+      let filtered = memoryDb.questions;
+      if (subject) filtered = filtered.filter(q => q.subject === subject);
+      if (chapter) filtered = filtered.filter(q => q.chapter === chapter);
+      
+      const paged = filtered.slice(skip, skip + parseInt(limit));
+      res.json({ questions: paged, total: filtered.length, page: parseInt(page), pages: Math.ceil(filtered.length / limit) });
+    }
+  } catch (error) {
+    console.error("Fetch Questions Error:", error);
+    res.status(500).json({ error: 'Failed to fetch questions' });
+  }
+});
+
+// Delete specific question
+app.delete('/api/admin/questions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (isDbConnected()) {
+      await QuestionBank.findByIdAndDelete(id);
+    } else {
+      memoryDb.questions = memoryDb.questions.filter(q => q._id !== id);
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete question' });
+  }
+});
+
 // High Performance Quiz Generation from DB
 app.post('/api/quiz/generate-from-db', async (req, res) => {
   try {
