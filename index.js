@@ -69,19 +69,6 @@ const memoryDb = {
       theme: 'orange',
       tag: 'Popular'
     }
-  ],
-  offlineExams: [
-    {
-      examCode: '101',
-      title: 'Physics 1st Paper: Vector (Demo)',
-      questions: [
-        { id: 1, correctAnswer: 'A', explanation: 'ভেক্টর রাশির মান ও দিক উভয়ই আছে।' },
-        { id: 2, correctAnswer: 'C', explanation: 'ডট গুণন স্কেলার রাশি তাই এটি বিনিময় সূত্র মেনে চলে।' },
-        { id: 3, correctAnswer: 'B', explanation: 'লব্ধির সর্বোচ্চ মান হলো ভেক্টরদ্বয়ের যোগফল।' },
-        { id: 4, correctAnswer: 'D', explanation: 'নদী পার হতে সর্বনিম্ন সময় t = d/v।' },
-        { id: 5, correctAnswer: 'A', explanation: 'গ্রেডিয়েন্ট একটি ভেক্টর রাশি।' }
-      ]
-    }
   ]
 };
 
@@ -214,17 +201,6 @@ const examPackSchema = new mongoose.Schema({
   tag: String
 });
 const ExamPack = mongoose.model('ExamPack', examPackSchema);
-
-const offlineExamSchema = new mongoose.Schema({
-  examCode: { type: String, required: true, unique: true },
-  title: String,
-  questions: [{
-    id: Number,
-    correctAnswer: String, // 'A', 'B', 'C', 'D'
-    explanation: String
-  }]
-});
-const OfflineExam = mongoose.model('OfflineExam', offlineExamSchema);
 
 // Static Question Pool for Fallback
 const BATTLE_QUESTIONS_FALLBACK = [
@@ -579,22 +555,6 @@ app.get('/api/exam-packs', async (req, res) => {
             res.json(memoryDb.examPacks);
         }
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
-});
-
-// --- OFFLINE OMR EXAM ---
-app.get('/api/offline-exams/:code', async (req, res) => {
-    try {
-        const { code } = req.params;
-        if (isDbConnected()) {
-            const exam = await OfflineExam.findOne({ examCode: code });
-            if (!exam) return res.status(404).json({ error: 'Exam not found' });
-            res.json(exam);
-        } else {
-            const exam = memoryDb.offlineExams.find(e => e.examCode === code);
-            if (!exam) return res.status(404).json({ error: 'Exam not found' });
-            res.json(exam);
-        }
-    } catch (e) { res.status(500).json({ error: 'Failed to fetch offline exam' }); }
 });
 
 // --- QUESTION BANK & SYLLABUS STATS ---
