@@ -275,6 +275,30 @@ app.get('/api/users/:userId/stats', async (req, res) => {
   }
 });
 
+// --- LEADERBOARD ROUTE ---
+app.get('/api/leaderboard', async (req, res) => {
+  try {
+    const limit = 100; // Top 100 users
+    let users;
+
+    if (isDbConnected()) {
+      users = await User.find({})
+        .sort({ points: -1 })
+        .limit(limit)
+        .select('uid displayName photoURL points');
+    } else {
+      users = memoryDb.users
+        .sort((a, b) => b.points - a.points)
+        .slice(0, limit)
+        .map(u => ({ uid: u.uid, displayName: u.displayName, photoURL: u.photoURL, points: u.points }));
+    }
+    
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch leaderboard' });
+  }
+});
+
 // --- EXAM RESULTS & ANALYTICS ---
 
 app.post('/api/users/:userId/exam-results', async (req, res) => {
