@@ -323,6 +323,75 @@ app.post('/api/quiz/generate-from-db', async (req, res) => {
   }
 });
 
+// Get Question Stats (Syllabus Structure with counts)
+app.get('/api/quiz/syllabus-stats', async (req, res) => {
+  try {
+    if (isDbConnected()) {
+      // Aggregation to count questions by Subject > Chapter > Topic
+      const stats = await QuestionBank.aggregate([
+        { 
+          $group: { 
+            _id: { subject: "$subject", chapter: "$chapter", topic: "$topic" }, 
+            count: { $sum: 1 } 
+          } 
+        },
+        {
+          $group: {
+            _id: { subject: "$_id.subject", chapter: "$_id.chapter" },
+            topics: { $push: { topic: "$_id.topic", count: "$count" } },
+            chapterTotal: { $sum: "$count" }
+          }
+        },
+        {
+          $group: {
+            _id: "$_id.subject",
+            chapters: { 
+              $push: { 
+                chapter: "$_id.chapter", 
+                topics: "$topics",
+                total: "$chapterTotal"
+              } 
+            },
+            subjectTotal: { $sum: "$chapterTotal" }
+          }
+        }
+      ]);
+      
+      // Transform into a cleaner object structure: { Subject: { Chapter: { Topic: Count } } }
+      const formattedStats = {};
+      stats.forEach(sub => {
+        formattedStats[sub._id] = { total: sub.subjectTotal, chapters: {} };
+        sub.chapters.forEach(chap => {
+          const topicCounts = {};
+          chap.topics.forEach(t => topicCounts[t.topic] = t.count);
+          formattedStats[sub._id].chapters[chap.chapter] = {
+            total: chap.total,
+            topics: topicCounts
+          };
+        });
+      });
+
+      res.json(formattedStats);
+    } else {
+      // Fallback Stats from Memory DB
+      const stats = {};
+      memoryDb.questions.forEach(q => {
+        if (!stats[q.subject]) stats[q.subject] = { total: 0, chapters: {} };
+        if (!stats[q.subject].chapters[q.chapter]) stats[q.subject].chapters[q.chapter] = { total: 0, topics: {} };
+        if (!stats[q.subject].chapters[q.chapter].topics[q.topic]) stats[q.subject].chapters[q.chapter].topics[q.topic] = 0;
+        
+        stats[q.subject].total++;
+        stats[q.subject].chapters[q.chapter].total++;
+        stats[q.subject].chapters[q.chapter].topics[q.topic]++;
+      });
+      res.json(stats);
+    }
+  } catch (error) {
+    console.error("Stats Error:", error);
+    res.status(500).json({ error: 'Failed to fetch syllabus stats' });
+  }
+});
+
 // --- NOTIFICATION ROUTES ---
 
 app.post('/api/admin/notifications', async (req, res) => {
