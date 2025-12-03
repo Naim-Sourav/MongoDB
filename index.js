@@ -21,7 +21,7 @@ const memoryDb = {
     { _id: '1', title: 'System', message: 'Running in fallback mode (Database disconnected)', type: 'WARNING', date: Date.now() }
   ],
   battles: [],
-  questions: [], // Stores generated questions
+  questions: [],
   savedQuestions: [],
   examResults: []
 };
@@ -44,6 +44,11 @@ const userSchema = new mongoose.Schema({
   displayName: String,
   photoURL: String,
   role: { type: String, default: 'student' },
+  // Extended Profile
+  college: String,
+  hscBatch: String,
+  department: String, // Science, Arts, Commerce
+  target: String,     // Medical, Varsity, Engineering
   points: { type: Number, default: 0 },
   totalExams: { type: Number, default: 0 },
   lastLogin: { type: Number, default: Date.now },
@@ -127,6 +132,12 @@ const examResultSchema = new mongoose.Schema({
   wrong: Number,
   skipped: Number,
   score: Number,
+  // Detailed Analysis
+  topicStats: [{
+    topic: String,
+    correct: Number,
+    total: Number
+  }],
   timestamp: { type: Number, default: Date.now }
 });
 examResultSchema.index({ userId: 1 });
@@ -151,13 +162,26 @@ app.get('/', (req, res) => {
 
 app.post('/api/users/sync', async (req, res) => {
   try {
-    const { uid, email, displayName, photoURL } = req.body;
+    const { uid, email, displayName, photoURL, college, hscBatch, department, target } = req.body;
+    const updateData = { 
+        uid, email, displayName, photoURL, lastLogin: Date.now(),
+        college, hscBatch, department, target 
+    };
+    
+    // Remove undefined keys
+    Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
+
     if (isDbConnected()) {
-      const user = await User.findOneAndUpdate({ uid }, { uid, email, displayName, photoURL, lastLogin: Date.now() }, { upsert: true, new: true });
+      const user = await User.findOneAndUpdate({ uid }, updateData, { upsert: true, new: true });
       return res.json(user);
     } else {
       let user = memoryDb.users.find(u => u.uid === uid);
-      if (!user) { user = { uid, email, displayName, photoURL, points: 0 }; memoryDb.users.push(user); }
+      if (!user) { 
+          user = { ...updateData, points: 0 }; 
+          memoryDb.users.push(user); 
+      } else {
+          Object.assign(user, updateData);
+      }
       return res.json(user);
     }
   } catch (e) { res.status(500).json({error: 'Sync failed'}); }
@@ -182,43 +206,77 @@ app.get('/api/users/:userId/enrollments', async (req, res) => {
 app.get('/api/users/:userId/stats', async (req, res) => {
     const { userId } = req.params;
     try {
+        let user, results;
         if (isDbConnected()) {
-            const user = await User.findOne({ uid: userId });
-            const results = await ExamResult.find({ userId });
-            
-            // Calc stats
-            const totalCorrect = results.reduce((acc, r) => acc + r.correct, 0);
-            const totalWrong = results.reduce((acc, r) => acc + r.wrong, 0);
-            
-            // Analyze subjects
-            const subjMap = {};
-            results.forEach(r => {
-                if (!subjMap[r.subject]) subjMap[r.subject] = { correct: 0, total: 0 };
-                subjMap[r.subject].correct += r.correct;
-                subjMap[r.subject].total += r.totalQuestions;
-            });
-            
-            const subjectBreakdown = Object.keys(subjMap).map(s => ({
-                subject: s,
-                accuracy: (subjMap[s].correct / subjMap[s].total) * 100
-            }));
-            
-            subjectBreakdown.sort((a,b) => b.accuracy - a.accuracy);
-
-            res.json({
-                points: user ? user.points : 0,
-                totalExams: results.length,
-                totalCorrect,
-                totalWrong,
-                subjectBreakdown,
-                strongestSubject: subjectBreakdown[0],
-                weakestSubject: subjectBreakdown[subjectBreakdown.length - 1]
-            });
+            user = await User.findOne({ uid: userId });
+            results = await ExamResult.find({ userId });
         } else {
-            const user = memoryDb.users.find(u => u.uid === userId);
-            res.json({ points: user ? user.points : 0, totalExams: 0, subjectBreakdown: [] });
+            user = memoryDb.users.find(u => u.uid === userId);
+            results = memoryDb.examResults.filter(r => r.userId === userId);
         }
-    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+
+        if (!user) return res.json({ points: 0, totalExams: 0 });
+
+        // Calc basic stats
+        const totalCorrect = results.reduce((acc, r) => acc + r.correct, 0);
+        const totalWrong = results.reduce((acc, r) => acc + r.wrong, 0);
+        
+        // Subject Analysis
+        const subjMap = {};
+        // Topic Analysis
+        const topicMap = {};
+
+        results.forEach(r => {
+            // Subject aggregation
+            if (!subjMap[r.subject]) subjMap[r.subject] = { correct: 0, total: 0 };
+            subjMap[r.subject].correct += r.correct;
+            subjMap[r.subject].total += r.totalQuestions;
+
+            // Topic aggregation (from topicStats array)
+            if (r.topicStats && Array.isArray(r.topicStats)) {
+                r.topicStats.forEach(ts => {
+                    if (!topicMap[ts.topic]) topicMap[ts.topic] = { correct: 0, total: 0 };
+                    topicMap[ts.topic].correct += ts.correct;
+                    topicMap[ts.topic].total += ts.total;
+                });
+            }
+        });
+        
+        const subjectBreakdown = Object.keys(subjMap).map(s => ({
+            subject: s,
+            accuracy: (subjMap[s].correct / subjMap[s].total) * 100
+        })).sort((a,b) => b.accuracy - a.accuracy);
+
+        const topicBreakdown = Object.keys(topicMap).map(t => ({
+            topic: t,
+            accuracy: (topicMap[t].correct / topicMap[t].total) * 100,
+            total: topicMap[t].total
+        })).sort((a,b) => b.accuracy - a.accuracy);
+
+        res.json({
+            user: {
+                college: user.college,
+                hscBatch: user.hscBatch,
+                department: user.department,
+                target: user.target,
+                points: user.points
+            },
+            points: user.points,
+            totalExams: results.length,
+            totalCorrect,
+            totalWrong,
+            subjectBreakdown,
+            topicBreakdown, // New field for detailed analysis
+            strongestSubject: subjectBreakdown[0],
+            weakestSubject: subjectBreakdown[subjectBreakdown.length - 1],
+            strongestTopics: topicBreakdown.slice(0, 5),
+            weakestTopics: topicBreakdown.slice().reverse().slice(0, 5)
+        });
+
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: 'Failed' }); 
+    }
 });
 
 app.post('/api/users/:userId/exam-results', async (req, res) => {
