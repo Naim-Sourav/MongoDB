@@ -84,6 +84,8 @@ mongoose.connect(MONGODB_URI, {
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
 // --- Schemas & Models (Mongoose) ---
+
+// Optimized User Schema with embedded stats
 const userSchema = new mongoose.Schema({
   uid: { type: String, required: true, unique: true },
   email: String,
@@ -93,12 +95,33 @@ const userSchema = new mongoose.Schema({
   // Extended Profile
   college: String,
   hscBatch: String,
-  department: String, // Science, Arts, Commerce
-  target: String,     // Medical, Varsity, Engineering
+  department: String,
+  target: String,
+  
   points: { type: Number, default: 0 },
   totalExams: { type: Number, default: 0 },
   lastLogin: { type: Number, default: Date.now },
-  createdAt: { type: Number, default: Date.now }
+  createdAt: { type: Number, default: Date.now },
+
+  // --- OPTIMIZATION START: Denormalized Stats ---
+  // Storing aggregated stats directly in User doc to avoid expensive queries on ExamResult
+  stats: {
+    totalCorrect: { type: Number, default: 0 },
+    totalWrong: { type: Number, default: 0 },
+    totalSkipped: { type: Number, default: 0 },
+    // Maps allow us to store dynamic keys (Subject Names / Topic Names)
+    subjectStats: { 
+      type: Map, 
+      of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), 
+      default: {} 
+    },
+    topicStats: { 
+      type: Map, 
+      of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), 
+      default: {} 
+    }
+  }
+  // --- OPTIMIZATION END ---
 });
 const User = mongoose.model('User', userSchema);
 
@@ -186,7 +209,8 @@ const examResultSchema = new mongoose.Schema({
   }],
   timestamp: { type: Number, default: Date.now }
 });
-examResultSchema.index({ userId: 1 });
+// Index for faster lookups if we ever need to rebuild stats
+examResultSchema.index({ userId: 1 }); 
 const ExamResult = mongoose.model('ExamResult', examResultSchema);
 
 const examPackSchema = new mongoose.Schema({
@@ -275,7 +299,7 @@ app.post('/api/users/sync', async (req, res) => {
     } else {
       let user = memoryDb.users.find(u => u.uid === uid);
       if (!user) { 
-          user = { ...updateData, points: 0 }; 
+          user = { ...updateData, points: 0, stats: { totalCorrect: 0, totalWrong: 0, totalSkipped: 0, subjectStats: {}, topicStats: {} } }; 
           memoryDb.users.push(user); 
       } else {
           Object.assign(user, updateData);
@@ -301,54 +325,81 @@ app.get('/api/users/:userId/enrollments', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Fetch enrollments failed' }); }
 });
 
+// --- OPTIMIZED GET STATS ---
 app.get('/api/users/:userId/stats', async (req, res) => {
     const { userId } = req.params;
     try {
-        let user, results;
+        let user;
         if (isDbConnected()) {
             user = await User.findOne({ uid: userId });
-            results = await ExamResult.find({ userId });
         } else {
             user = memoryDb.users.find(u => u.uid === userId);
-            results = memoryDb.examResults.filter(r => r.userId === userId);
         }
 
         if (!user) return res.json({ points: 0, totalExams: 0 });
 
-        // Calc basic stats
-        const totalCorrect = results.reduce((acc, r) => acc + r.correct, 0);
-        const totalWrong = results.reduce((acc, r) => acc + r.wrong, 0);
-        
-        // Subject Analysis
-        const subjMap = {};
-        // Topic Analysis
-        const topicMap = {};
+        // Self-Healing: If user exists but has no aggregated stats (Legacy user), build them once
+        // This is a one-time expensive operation per user, then it becomes fast.
+        if (isDbConnected() && (!user.stats || !user.stats.totalCorrect) && user.totalExams > 0) {
+            console.log(`Migrating stats for user ${userId}...`);
+            const results = await ExamResult.find({ userId });
+            
+            // Rebuild stats logic
+            let totalCorrect = 0, totalWrong = 0, totalSkipped = 0;
+            const subjectStats = {};
+            const topicStats = {};
 
-        results.forEach(r => {
-            // Subject aggregation
-            if (!subjMap[r.subject]) subjMap[r.subject] = { correct: 0, total: 0 };
-            subjMap[r.subject].correct += r.correct;
-            subjMap[r.subject].total += r.totalQuestions;
+            results.forEach(r => {
+                totalCorrect += r.correct;
+                totalWrong += r.wrong;
+                totalSkipped += (r.skipped || 0);
 
-            // Topic aggregation (from topicStats array)
-            if (r.topicStats && Array.isArray(r.topicStats)) {
-                r.topicStats.forEach(ts => {
-                    if (!topicMap[ts.topic]) topicMap[ts.topic] = { correct: 0, total: 0 };
-                    topicMap[ts.topic].correct += ts.correct;
-                    topicMap[ts.topic].total += ts.total;
-                });
-            }
-        });
+                // Subject Agg
+                if (!subjectStats[r.subject]) subjectStats[r.subject] = { correct: 0, total: 0 };
+                subjectStats[r.subject].correct += r.correct;
+                subjectStats[r.subject].total += r.totalQuestions;
+
+                // Topic Agg
+                if (r.topicStats && Array.isArray(r.topicStats)) {
+                    r.topicStats.forEach(ts => {
+                        if (!topicStats[ts.topic]) topicStats[ts.topic] = { correct: 0, total: 0 };
+                        topicStats[ts.topic].correct += ts.correct;
+                        topicStats[ts.topic].total += ts.total;
+                    });
+                }
+            });
+
+            // Save to User
+            user.stats = { totalCorrect, totalWrong, totalSkipped, subjectStats, topicStats };
+            await user.save();
+        }
+
+        // --- Fast Read Logic ---
+        // Construct breakdown arrays from the embedded Maps/Objects
         
-        const subjectBreakdown = Object.keys(subjMap).map(s => ({
+        let subjectBreakdown = [];
+        let topicBreakdown = [];
+
+        // Handle Map vs Object (Mongoose Map vs Memory Object)
+        const subjStatsObj = user.stats?.subjectStats instanceof Map 
+            ? Object.fromEntries(user.stats.subjectStats) 
+            : (user.stats?.subjectStats || {});
+            
+        const topicStatsObj = user.stats?.topicStats instanceof Map 
+            ? Object.fromEntries(user.stats.topicStats) 
+            : (user.stats?.topicStats || {});
+
+        // Convert Subject Stats to Array
+        subjectBreakdown = Object.keys(subjStatsObj).map(s => ({
             subject: s,
-            accuracy: (subjMap[s].correct / subjMap[s].total) * 100
+            accuracy: (subjStatsObj[s].correct / subjStatsObj[s].total) * 100
         })).sort((a,b) => b.accuracy - a.accuracy);
 
-        const topicBreakdown = Object.keys(topicMap).map(t => ({
+        // Convert Topic Stats to Array
+        topicBreakdown = Object.keys(topicStatsObj).map(t => ({
             topic: t,
-            accuracy: (topicMap[t].correct / topicMap[t].total) * 100,
-            total: topicMap[t].total
+            accuracy: (topicStatsObj[t].correct / topicStatsObj[t].total) * 100,
+            total: topicStatsObj[t].total
         })).sort((a,b) => b.accuracy - a.accuracy);
 
         res.json({
@@ -360,11 +411,11 @@ app.get('/api/users/:userId/stats', async (req, res) => {
                 points: user.points
             },
             points: user.points,
-            totalExams: results.length,
-            totalCorrect,
-            totalWrong,
+            totalExams: user.totalExams,
+            totalCorrect: user.stats?.totalCorrect || 0,
+            totalWrong: user.stats?.totalWrong || 0,
             subjectBreakdown,
-            topicBreakdown, // New field for detailed analysis
+            topicBreakdown,
             strongestSubject: subjectBreakdown[0],
             weakestSubject: subjectBreakdown[subjectBreakdown.length - 1],
             strongestTopics: topicBreakdown.slice(0, 5),
@@ -377,27 +428,77 @@ app.get('/api/users/:userId/stats', async (req, res) => {
     }
 });
 
+// --- OPTIMIZED POST EXAM (Write-Heavy) ---
 app.post('/api/users/:userId/exam-results', async (req, res) => {
     try {
         const { userId } = req.params;
         const resultData = { userId, ...req.body, timestamp: Date.now() };
         
         if (isDbConnected()) {
+            // 1. Save the detailed result (Archival/History)
             await new ExamResult(resultData).save();
-            // Update User Points
-            const pointsToAdd = (resultData.correct * 10) + 20; // 10 per correct, 20 bonus for finish
-            await User.findOneAndUpdate({ uid: userId }, { 
-                $inc: { points: pointsToAdd, totalExams: 1 } 
-            });
+            
+            // 2. Determine User Update Operation (Aggregated Stats)
+            const user = await User.findOne({ uid: userId });
+            
+            if (user) {
+                // Initialize stats if missing
+                if (!user.stats) user.stats = { totalCorrect:0, totalWrong:0, totalSkipped:0, subjectStats: {}, topicStats: {} };
+                
+                // Update Global Totals
+                user.points = (user.points || 0) + (resultData.correct * 10) + 20; // 10 pts per correct, 20 bonus
+                user.totalExams = (user.totalExams || 0) + 1;
+                user.stats.totalCorrect = (user.stats.totalCorrect || 0) + resultData.correct;
+                user.stats.totalWrong = (user.stats.totalWrong || 0) + resultData.wrong;
+                user.stats.totalSkipped = (user.stats.totalSkipped || 0) + (resultData.skipped || 0);
+
+                // Update Subject Stats
+                const subj = resultData.subject;
+                const currentSubjStat = user.stats.subjectStats.get(subj) || { correct: 0, total: 0 };
+                user.stats.subjectStats.set(subj, {
+                    correct: currentSubjStat.correct + resultData.correct,
+                    total: currentSubjStat.total + resultData.totalQuestions
+                });
+
+                // Update Topic Stats
+                if (resultData.topicStats && Array.isArray(resultData.topicStats)) {
+                    resultData.topicStats.forEach(ts => {
+                        const topicName = ts.topic;
+                        const currentTopicStat = user.stats.topicStats.get(topicName) || { correct: 0, total: 0 };
+                        user.stats.topicStats.set(topicName, {
+                            correct: currentTopicStat.correct + ts.correct,
+                            total: currentTopicStat.total + ts.total
+                        });
+                    });
+                }
+
+                await user.save();
+            }
         } else {
+            // Memory Mode
             memoryDb.examResults.push(resultData);
             const user = memoryDb.users.find(u => u.uid === userId);
             if(user) {
+                // Simple Memory Aggregation Logic
                 user.points = (user.points || 0) + (resultData.correct * 10) + 20;
+                user.totalExams = (user.totalExams || 0) + 1;
+                
+                if (!user.stats) user.stats = { totalCorrect:0, totalWrong:0, totalSkipped:0, subjectStats: {}, topicStats: {} };
+                user.stats.totalCorrect += resultData.correct;
+                user.stats.totalWrong += resultData.wrong;
+                
+                // Simplified Memory Subject Update
+                const subj = resultData.subject;
+                if(!user.stats.subjectStats[subj]) user.stats.subjectStats[subj] = { correct: 0, total: 0 };
+                user.stats.subjectStats[subj].correct += resultData.correct;
+                user.stats.subjectStats[subj].total += resultData.totalQuestions;
             }
         }
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: 'Failed' }); 
+    }
 });
 
 // --- SAVED QUESTIONS ---
