@@ -246,6 +246,102 @@ app.post('/api/users/sync', async (req, res) => {
   } catch (e) { res.status(500).json({error: 'Sync failed'}); }
 });
 
+// Get User Stats
+app.get('/api/users/:userId/stats', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    let user;
+    if (isDbConnected()) {
+        user = await User.findOne({ uid: userId });
+    } else {
+        user = memoryDb.users.find(u => u.uid === userId);
+    }
+
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Helper to normalize stats map
+    const normalizeMap = (m) => {
+        if (!m) return {};
+        if (m instanceof Map) return Object.fromEntries(m);
+        return m;
+    };
+
+    const subjectStats = normalizeMap(user.stats?.subjectStats);
+    const topicStats = normalizeMap(user.stats?.topicStats);
+
+    const subjectBreakdown = Object.keys(subjectStats).map(key => {
+        const s = subjectStats[key] || { correct: 0, total: 0 };
+        const correct = s.correct || 0;
+        const total = s.total || 0;
+        return {
+            subject: key,
+            accuracy: total > 0 ? (correct / total) * 100 : 0
+        };
+    });
+
+    const topicsArr = Object.keys(topicStats).map(key => {
+        const t = topicStats[key] || { correct: 0, total: 0 };
+        const correct = t.correct || 0;
+        const total = t.total || 0;
+        return {
+            topic: key,
+            accuracy: total > 0 ? (correct / total) * 100 : 0,
+            total
+        };
+    });
+
+    // Sort by accuracy
+    topicsArr.sort((a, b) => b.accuracy - a.accuracy);
+    
+    const strongestTopics = topicsArr.filter(t => t.total >= 3).slice(0, 3); // Min 3 questions attempts
+    const weakestTopics = topicsArr.filter(t => t.total >= 3).reverse().slice(0, 3);
+
+    res.json({
+        totalExams: user.totalExams || 0,
+        totalCorrect: user.stats?.totalCorrect || 0,
+        totalWrong: user.stats?.totalWrong || 0,
+        points: user.points || 0,
+        subjectBreakdown,
+        strongestTopics,
+        weakestTopics,
+        user: { 
+            college: user.college,
+            hscBatch: user.hscBatch,
+            department: user.department,
+            target: user.target
+        }
+    });
+
+  } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'Stats fetch failed' });
+  }
+});
+
+// Get User Enrollments
+app.get('/api/users/:userId/enrollments', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        let payments = [];
+        
+        if (isDbConnected()) {
+            payments = await Payment.find({ userId, status: 'APPROVED' });
+        } else {
+            payments = memoryDb.payments.filter(p => p.userId === userId && p.status === 'APPROVED');
+        }
+
+        const courses = payments.map(p => ({
+            id: p.courseId,
+            title: p.courseTitle,
+            progress: 0 // Default for now
+        }));
+
+        res.json(courses);
+    } catch (e) {
+        res.status(500).json({ error: 'Enrollments fetch failed' });
+    }
+});
+
 // Exam Results & Mistakes
 app.post('/api/users/:userId/exam-results', async (req, res) => {
     try {
@@ -272,10 +368,35 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                 user.totalExams = (user.totalExams || 0) + 1;
                 user.stats.totalCorrect += resultData.correct;
                 user.stats.totalWrong += resultData.wrong;
+                
+                // Update Subject Stats
+                const subject = resultData.subject;
+                if (!user.stats.subjectStats.has(subject)) user.stats.subjectStats.set(subject, { correct: 0, total: 0 });
+                const subStat = user.stats.subjectStats.get(subject);
+                subStat.correct += resultData.correct;
+                subStat.total += resultData.totalQuestions;
+                
+                // Update Topic Stats
+                if (resultData.topicStats) {
+                    resultData.topicStats.forEach(t => {
+                        if (!user.stats.topicStats.has(t.topic)) user.stats.topicStats.set(t.topic, { correct: 0, total: 0 });
+                        const topStat = user.stats.topicStats.get(t.topic);
+                        topStat.correct += t.correct;
+                        topStat.total += t.total;
+                    });
+                }
+
                 await user.save();
             }
         } else {
             memoryDb.examResults.push(examResultData);
+            let user = memoryDb.users.find(u => u.uid === userId);
+            if(user) {
+                user.points = (user.points || 0) + (resultData.correct * 10) + 20;
+                user.totalExams = (user.totalExams || 0) + 1;
+                // Simplified stat update for memory mode
+            }
+
             if (mistakes && mistakes.length > 0) {
                 mistakes.forEach(m => {
                     const existing = memoryDb.mistakes.find(mk => mk.userId === userId && mk.question === m.question);
@@ -285,7 +406,7 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
             }
         }
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+    } catch (e) { console.error(e); res.status(500).json({ error: 'Failed' }); }
 });
 
 // Mistake Routes
