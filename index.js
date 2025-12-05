@@ -431,6 +431,79 @@ app.delete('/api/users/:userId/mistakes/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Failed to delete' }); }
 });
 
+// --- SAVED QUESTIONS ROUTES ---
+
+// Get Saved Questions
+app.get('/api/users/:userId/saved-questions', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (isDbConnected()) {
+      const saved = await SavedQuestion.find({ userId }).populate('questionId');
+      // Filter out null populated questions (if original was deleted)
+      const filtered = saved.filter(s => s.questionId); 
+      res.json(filtered);
+    } else {
+        // Memory mode join
+        const saved = memoryDb.savedQuestions
+            .filter(sq => sq.userId === userId)
+            .map(sq => {
+                const q = memoryDb.questions.find(q => q._id === sq.questionId);
+                return q ? { ...sq, questionId: q } : null;
+            })
+            .filter(s => s);
+        res.json(saved);
+    }
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to fetch saved questions' });
+  }
+});
+
+// Toggle Save Question
+app.post('/api/users/:userId/saved-questions', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { questionId } = req.body;
+
+    if (isDbConnected()) {
+      const existing = await SavedQuestion.findOne({ userId, questionId });
+      if (existing) {
+        await SavedQuestion.findByIdAndDelete(existing._id);
+        res.json({ status: 'removed' });
+      } else {
+        await new SavedQuestion({ userId, questionId }).save();
+        res.json({ status: 'saved' });
+      }
+    } else {
+      const existingIdx = memoryDb.savedQuestions.findIndex(sq => sq.userId === userId && sq.questionId === questionId);
+      if (existingIdx > -1) {
+        memoryDb.savedQuestions.splice(existingIdx, 1);
+        res.json({ status: 'removed' });
+      } else {
+        memoryDb.savedQuestions.push({ _id: Date.now().toString(), userId, questionId, savedAt: Date.now() });
+        res.json({ status: 'saved' });
+      }
+    }
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to toggle save' });
+  }
+});
+
+// Delete Saved Question (Directly by ID)
+app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (isDbConnected()) {
+      await SavedQuestion.findByIdAndDelete(id);
+    } else {
+      const idx = memoryDb.savedQuestions.findIndex(sq => sq._id === id);
+      if (idx > -1) memoryDb.savedQuestions.splice(idx, 1);
+    }
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to delete saved question' });
+  }
+});
+
 // --- BATTLE ROUTES UPDATED ---
 
 app.post('/api/battles/create', async (req, res) => {
