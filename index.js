@@ -530,6 +530,18 @@ app.get('/api/users/:userId/mistakes', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Failed to fetch mistakes' }); }
 });
 
+app.delete('/api/users/:userId/mistakes/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (isDbConnected()) {
+            await Mistake.findByIdAndDelete(id);
+        } else {
+            memoryDb.mistakes = memoryDb.mistakes.filter(m => m._id !== id);
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: 'Failed to delete mistake' }); }
+});
+
 // --- SAVED QUESTIONS ---
 
 app.get('/api/users/:userId/saved-questions', async (req, res) => {
