@@ -1,3 +1,4 @@
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -295,6 +296,81 @@ app.get('/api/admin/stats', async (req, res) => {
   } catch (e) {
       res.status(500).json({ error: 'Stats failed' });
   }
+});
+
+// --- TAXONOMY (Subjects & Chapters) ---
+app.get('/api/admin/taxonomy', async (req, res) => {
+    try {
+        let subjects = [];
+        let chapters = {};
+
+        if (isDbConnected()) {
+            const distinctSubjects = await QuestionBank.distinct('subject');
+            subjects = distinctSubjects.sort();
+
+            for (const sub of subjects) {
+                const distinctChapters = await QuestionBank.distinct('chapter', { subject: sub });
+                chapters[sub] = distinctChapters.sort();
+            }
+        } else {
+            // Memory fallback
+            const distinctSubjects = [...new Set(memoryDb.questions.map(q => q.subject))];
+            subjects = distinctSubjects.sort();
+            for (const sub of subjects) {
+                const distinctChapters = [...new Set(memoryDb.questions.filter(q => q.subject === sub).map(q => q.chapter))];
+                chapters[sub] = distinctChapters.sort();
+            }
+        }
+        res.json({ subjects, chapters });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'Failed to fetch taxonomy' });
+    }
+});
+
+// --- MAINTENANCE ENDPOINTS ---
+app.post('/api/admin/maintenance/rename', async (req, res) => {
+    try {
+        const { target, newName } = req.body;
+        if (!target || !newName) return res.status(400).json({ error: 'Missing params' });
+
+        if (isDbConnected()) {
+            const result = await QuestionBank.updateMany(
+                { subject: target },
+                { $set: { subject: newName } }
+            );
+            res.json({ success: true, modified: result.modifiedCount });
+        } else {
+            let count = 0;
+            memoryDb.questions.forEach(q => {
+                if (q.subject === target) {
+                    q.subject = newName;
+                    count++;
+                }
+            });
+            res.json({ success: true, modified: count });
+        }
+    } catch (e) {
+        res.status(500).json({ error: 'Rename failed' });
+    }
+});
+
+app.post('/api/admin/maintenance/delete-subject', async (req, res) => {
+    try {
+        const { subject } = req.body;
+        if (!subject) return res.status(400).json({ error: 'Missing subject' });
+
+        if (isDbConnected()) {
+            const result = await QuestionBank.deleteMany({ subject });
+            res.json({ success: true, deleted: result.deletedCount });
+        } else {
+            const initialLen = memoryDb.questions.length;
+            memoryDb.questions = memoryDb.questions.filter(q => q.subject !== subject);
+            res.json({ success: true, deleted: initialLen - memoryDb.questions.length });
+        }
+    } catch (e) {
+        res.status(500).json({ error: 'Delete failed' });
+    }
 });
 
 // --- USER MANAGEMENT ---
