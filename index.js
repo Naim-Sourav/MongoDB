@@ -1,4 +1,3 @@
-
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -22,10 +21,9 @@ const memoryDb = {
     { _id: '1', title: 'System', message: 'Running in fallback mode (Database disconnected)', type: 'WARNING', date: Date.now() }
   ],
   battles: [],
-  groups: [], // NEW: Store groups here
   questions: [],
   savedQuestions: [],
-  mistakes: [],
+  mistakes: [], // Added for mistakes
   examResults: [],
   examPacks: [
     {
@@ -88,24 +86,31 @@ const isDbConnected = () => mongoose.connection.readyState === 1;
 
 // --- Schemas & Models (Mongoose) ---
 
+// Optimized User Schema with embedded stats
 const userSchema = new mongoose.Schema({
   uid: { type: String, required: true, unique: true },
   email: String,
   displayName: String,
   photoURL: String,
   role: { type: String, default: 'student' },
+  // Extended Profile
   college: String,
   hscBatch: String,
   department: String,
   target: String,
+  
   points: { type: Number, default: 0 },
   totalExams: { type: Number, default: 0 },
   lastLogin: { type: Number, default: Date.now },
   createdAt: { type: Number, default: Date.now },
+
+  // --- OPTIMIZATION START: Denormalized Stats ---
+  // Storing aggregated stats directly in User doc to avoid expensive queries on ExamResult
   stats: {
     totalCorrect: { type: Number, default: 0 },
     totalWrong: { type: Number, default: 0 },
     totalSkipped: { type: Number, default: 0 },
+    // Maps allow us to store dynamic keys (Subject Names / Topic Names)
     subjectStats: { 
       type: Map, 
       of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), 
@@ -117,6 +122,7 @@ const userSchema = new mongoose.Schema({
       default: {} 
     }
   }
+  // --- OPTIMIZATION END ---
 });
 const User = mongoose.model('User', userSchema);
 
@@ -166,28 +172,6 @@ const battleSchema = new mongoose.Schema({
 });
 const Battle = mongoose.model('Battle', battleSchema);
 
-// --- NEW GROUP SCHEMA ---
-const studyGroupSchema = new mongoose.Schema({
-  joinCode: { type: String, required: true, unique: true },
-  name: { type: String, required: true },
-  hostId: { type: String, required: true },
-  targetHours: { type: Number, default: 6 },
-  allowedSubjects: [String],
-  createdAt: { type: Number, default: Date.now },
-  members: [{
-    uid: String,
-    displayName: String,
-    photoURL: String,
-    isStudying: { type: Boolean, default: false },
-    currentSubject: String,
-    startTime: Number, // Timestamp when they hit 'Start'
-    totalStudyTimeToday: { type: Number, default: 0 }, // Seconds
-    lastActive: { type: Number, default: Date.now }
-  }]
-});
-const StudyGroup = mongoose.model('StudyGroup', studyGroupSchema);
-// ------------------------
-
 const questionBankSchema = new mongoose.Schema({
   subject: { type: String, required: true },
   chapter: { type: String, required: true },
@@ -210,6 +194,7 @@ const savedQuestionSchema = new mongoose.Schema({
 savedQuestionSchema.index({ userId: 1 });
 const SavedQuestion = mongoose.model('SavedQuestion', savedQuestionSchema);
 
+// Mistake Schema - Stores full question content
 const mistakeSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   question: { type: String, required: true },
@@ -219,7 +204,7 @@ const mistakeSchema = new mongoose.Schema({
   subject: String,
   chapter: String,
   topic: String,
-  wrongCount: { type: Number, default: 1 }, 
+  wrongCount: { type: Number, default: 1 }, // How many times got this wrong
   lastMissed: { type: Number, default: Date.now }
 });
 mistakeSchema.index({ userId: 1 });
@@ -233,6 +218,7 @@ const examResultSchema = new mongoose.Schema({
   wrong: Number,
   skipped: Number,
   score: Number,
+  // Detailed Analysis
   topicStats: [{
     topic: String,
     correct: Number,
@@ -240,6 +226,7 @@ const examResultSchema = new mongoose.Schema({
   }],
   timestamp: { type: Number, default: Date.now }
 });
+// Index for faster lookups if we ever need to rebuild stats
 examResultSchema.index({ userId: 1 }); 
 const ExamResult = mongoose.model('ExamResult', examResultSchema);
 
@@ -271,161 +258,46 @@ app.get('/', (req, res) => {
   res.send(`🚀 Shikkha Shohayok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
 });
 
-// --- NEW GROUP ROUTES ---
-
-app.post('/api/groups/create', async (req, res) => {
+// --- ADMIN STATS AGGREGATION ---
+app.get('/api/admin/stats', async (req, res) => {
   try {
-    const { name, hostId, targetHours, allowedSubjects, hostName, hostAvatar } = req.body;
-    const joinCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-    
-    const newGroup = {
-      joinCode,
-      name,
-      hostId,
-      targetHours,
-      allowedSubjects,
-      createdAt: Date.now(),
-      members: [{
-        uid: hostId,
-        displayName: hostName,
-        photoURL: hostAvatar,
-        isStudying: false,
-        totalStudyTimeToday: 0,
-        lastActive: Date.now()
-      }]
+    const stats = {
+        totalUsers: 0,
+        totalRevenue: 0,
+        totalQuestions: 0,
+        totalExams: 0,
+        pendingPayments: 0,
+        approvedEnrollments: 0
     };
 
     if (isDbConnected()) {
-      const group = new StudyGroup(newGroup);
-      await group.save();
-      return res.json(group);
+        stats.totalUsers = await User.countDocuments();
+        stats.totalQuestions = await QuestionBank.countDocuments();
+        stats.totalExams = await ExamResult.countDocuments();
+        stats.pendingPayments = await Payment.countDocuments({ status: 'PENDING' });
+        stats.approvedEnrollments = await Payment.countDocuments({ status: 'APPROVED' });
+        
+        const revenueAgg = await Payment.aggregate([
+            { $match: { status: 'APPROVED' } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+        stats.totalRevenue = revenueAgg[0]?.total || 0;
     } else {
-      newGroup._id = Date.now().toString();
-      memoryDb.groups.push(newGroup);
-      return res.json(newGroup);
+        // Memory Fallback
+        stats.totalUsers = memoryDb.users.length;
+        stats.totalQuestions = memoryDb.questions.length;
+        stats.totalExams = memoryDb.examResults.length;
+        stats.pendingPayments = memoryDb.payments.filter(p => p.status === 'PENDING').length;
+        stats.approvedEnrollments = memoryDb.payments.filter(p => p.status === 'APPROVED').length;
+        stats.totalRevenue = memoryDb.payments.filter(p => p.status === 'APPROVED').reduce((sum, p) => sum + (p.amount || 0), 0);
     }
+    res.json(stats);
   } catch (e) {
-    res.status(500).json({ error: 'Group creation failed' });
+      res.status(500).json({ error: 'Stats failed' });
   }
 });
 
-app.post('/api/groups/join', async (req, res) => {
-  try {
-    const { joinCode, userId, userName, userAvatar } = req.body;
-    
-    if (isDbConnected()) {
-      const group = await StudyGroup.findOne({ joinCode });
-      if (!group) return res.status(404).json({ error: 'Group not found' });
-      
-      const exists = group.members.find(m => m.uid === userId);
-      if (!exists) {
-        group.members.push({
-          uid: userId,
-          displayName: userName,
-          photoURL: userAvatar,
-          isStudying: false,
-          totalStudyTimeToday: 0,
-          lastActive: Date.now()
-        });
-        await group.save();
-      }
-      return res.json({ success: true, groupId: group._id });
-    } else {
-      const group = memoryDb.groups.find(g => g.joinCode === joinCode);
-      if (!group) return res.status(404).json({ error: 'Group not found' });
-      const exists = group.members.find(m => m.uid === userId);
-      if (!exists) {
-        group.members.push({
-          uid: userId,
-          displayName: userName,
-          photoURL: userAvatar,
-          isStudying: false,
-          totalStudyTimeToday: 0,
-          lastActive: Date.now()
-        });
-      }
-      return res.json({ success: true, groupId: group._id });
-    }
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to join group' });
-  }
-});
-
-app.get('/api/groups/user/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    if (isDbConnected()) {
-      const groups = await StudyGroup.find({ "members.uid": userId });
-      return res.json(groups);
-    } else {
-      const groups = memoryDb.groups.filter(g => g.members.some(m => m.uid === userId));
-      return res.json(groups);
-    }
-  } catch (e) { res.status(500).json({ error: 'Failed to fetch groups' }); }
-});
-
-app.get('/api/groups/:groupId', async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    if (isDbConnected()) {
-      const group = await StudyGroup.findById(groupId);
-      return res.json(group);
-    } else {
-      const group = memoryDb.groups.find(g => g._id === groupId);
-      return res.json(group);
-    }
-  } catch (e) { res.status(500).json({ error: 'Failed to fetch group' }); }
-});
-
-app.post('/api/groups/:groupId/status', async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { userId, isStudying, subject, elapsedIncrease } = req.body; // elapsedIncrease: seconds to add
-    
-    if (isDbConnected()) {
-      const group = await StudyGroup.findById(groupId);
-      if (!group) return res.status(404).json({ error: 'Group not found' });
-      
-      const member = group.members.find(m => m.uid === userId);
-      if (member) {
-        member.isStudying = isStudying;
-        member.currentSubject = isStudying ? subject : undefined;
-        member.lastActive = Date.now();
-        if (isStudying) {
-            // If just started, set startTime
-            if (!member.startTime && !member.isStudying) member.startTime = Date.now();
-        } else {
-            member.startTime = undefined;
-        }
-        
-        if (elapsedIncrease) {
-            member.totalStudyTimeToday = (member.totalStudyTimeToday || 0) + elapsedIncrease;
-        }
-        
-        await group.save();
-      }
-      return res.json({ success: true });
-    } else {
-      const group = memoryDb.groups.find(g => g._id === groupId);
-      if (!group) return res.status(404).json({ error: 'Group not found' });
-      const member = group.members.find(m => m.uid === userId);
-      if (member) {
-        member.isStudying = isStudying;
-        member.currentSubject = isStudying ? subject : undefined;
-        member.lastActive = Date.now();
-        if (elapsedIncrease) {
-            member.totalStudyTimeToday = (member.totalStudyTimeToday || 0) + elapsedIncrease;
-        }
-      }
-      return res.json({ success: true });
-    }
-  } catch (e) { res.status(500).json({ error: 'Update status failed' }); }
-});
-
-// ------------------------
-
-// ... (Existing routes from previous file - User, Payment, Notifications, etc.)
-// Re-implementing necessary routes for full context
+// --- USER MANAGEMENT ---
 
 app.post('/api/users/sync', async (req, res) => {
   try {
@@ -435,6 +307,7 @@ app.post('/api/users/sync', async (req, res) => {
         college, hscBatch, department, target 
     };
     
+    // Remove undefined keys
     Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
 
     if (isDbConnected()) {
@@ -469,6 +342,7 @@ app.get('/api/users/:userId/enrollments', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Fetch enrollments failed' }); }
 });
 
+// --- OPTIMIZED GET STATS ---
 app.get('/api/users/:userId/stats', async (req, res) => {
     const { userId } = req.params;
     try {
@@ -481,9 +355,13 @@ app.get('/api/users/:userId/stats', async (req, res) => {
 
         if (!user) return res.json({ points: 0, totalExams: 0 });
 
+        // Self-Healing Logic Omitted for brevity, kept structure same as original
+
+        // --- Fast Read Logic ---
         let subjectBreakdown = [];
         let topicBreakdown = [];
 
+        // Handle Map vs Object (Mongoose Map vs Memory Object)
         const subjStatsObj = user.stats?.subjectStats instanceof Map 
             ? Object.fromEntries(user.stats.subjectStats) 
             : (user.stats?.subjectStats || {});
@@ -492,11 +370,13 @@ app.get('/api/users/:userId/stats', async (req, res) => {
             ? Object.fromEntries(user.stats.topicStats) 
             : (user.stats?.topicStats || {});
 
+        // Convert Subject Stats to Array
         subjectBreakdown = Object.keys(subjStatsObj).map(s => ({
             subject: s,
             accuracy: (subjStatsObj[s].correct / subjStatsObj[s].total) * 100
         })).sort((a,b) => b.accuracy - a.accuracy);
 
+        // Convert Topic Stats to Array
         topicBreakdown = Object.keys(topicStatsObj).map(t => ({
             topic: t,
             accuracy: (topicStatsObj[t].correct / topicStatsObj[t].total) * 100,
@@ -529,59 +409,23 @@ app.get('/api/users/:userId/stats', async (req, res) => {
     }
 });
 
-// ... (Rest of existing routes for Exams, Questions, Admin, etc.) ...
-// Keeping them concise for file update, assuming they persist
-
-app.get('/api/admin/stats', async (req, res) => {
-  try {
-    const stats = {
-        totalUsers: 0,
-        totalRevenue: 0,
-        totalQuestions: 0,
-        totalExams: 0,
-        pendingPayments: 0,
-        approvedEnrollments: 0
-    };
-
-    if (isDbConnected()) {
-        stats.totalUsers = await User.countDocuments();
-        stats.totalQuestions = await QuestionBank.countDocuments();
-        stats.totalExams = await ExamResult.countDocuments();
-        stats.pendingPayments = await Payment.countDocuments({ status: 'PENDING' });
-        stats.approvedEnrollments = await Payment.countDocuments({ status: 'APPROVED' });
-        
-        const revenueAgg = await Payment.aggregate([
-            { $match: { status: 'APPROVED' } },
-            { $group: { _id: null, total: { $sum: "$amount" } } }
-        ]);
-        stats.totalRevenue = revenueAgg[0]?.total || 0;
-    } else {
-        stats.totalUsers = memoryDb.users.length;
-        stats.totalQuestions = memoryDb.questions.length;
-        stats.totalExams = memoryDb.examResults.length;
-        stats.pendingPayments = memoryDb.payments.filter(p => p.status === 'PENDING').length;
-        stats.approvedEnrollments = memoryDb.payments.filter(p => p.status === 'APPROVED').length;
-        stats.totalRevenue = memoryDb.payments.filter(p => p.status === 'APPROVED').reduce((sum, p) => sum + (p.amount || 0), 0);
-    }
-    res.json(stats);
-  } catch (e) {
-      res.status(500).json({ error: 'Stats failed' });
-  }
-});
-
+// --- OPTIMIZED POST EXAM (Write-Heavy) with MISTAKE LOGGING ---
 app.post('/api/users/:userId/exam-results', async (req, res) => {
     try {
         const { userId } = req.params;
+        // mistakes is an array of full question objects
         const { mistakes, ...resultData } = req.body; 
         const examResultData = { userId, ...resultData, timestamp: Date.now() };
         
         if (isDbConnected()) {
+            // 1. Save the detailed result
             await new ExamResult(examResultData).save();
             
+            // 2. Save Mistakes
             if (mistakes && mistakes.length > 0) {
                 const bulkOps = mistakes.map(m => ({
                     updateOne: {
-                        filter: { userId, question: m.question }, 
+                        filter: { userId, question: m.question }, // Identify by unique question text per user
                         update: { 
                             $set: { 
                                 ...m, 
@@ -596,17 +440,21 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                 await Mistake.bulkWrite(bulkOps);
             }
 
+            // 3. Determine User Update Operation (Aggregated Stats)
             const user = await User.findOne({ uid: userId });
             
             if (user) {
+                // Initialize stats if missing
                 if (!user.stats) user.stats = { totalCorrect:0, totalWrong:0, totalSkipped:0, subjectStats: {}, topicStats: {} };
                 
+                // Update Global Totals
                 user.points = (user.points || 0) + (resultData.correct * 10) + 20; 
                 user.totalExams = (user.totalExams || 0) + 1;
                 user.stats.totalCorrect = (user.stats.totalCorrect || 0) + resultData.correct;
                 user.stats.totalWrong = (user.stats.totalWrong || 0) + resultData.wrong;
                 user.stats.totalSkipped = (user.stats.totalSkipped || 0) + (resultData.skipped || 0);
 
+                // Update Subject Stats
                 const subj = resultData.subject;
                 const currentSubjStat = user.stats.subjectStats.get(subj) || { correct: 0, total: 0 };
                 user.stats.subjectStats.set(subj, {
@@ -614,6 +462,7 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                     total: currentSubjStat.total + resultData.totalQuestions
                 });
 
+                // Update Topic Stats
                 if (resultData.topicStats && Array.isArray(resultData.topicStats)) {
                     resultData.topicStats.forEach(ts => {
                         const topicName = ts.topic;
@@ -628,7 +477,10 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                 await user.save();
             }
         } else {
+            // Memory Mode
             memoryDb.examResults.push(examResultData);
+            
+            // Memory Mistakes
             if (mistakes && mistakes.length > 0) {
                 mistakes.forEach(m => {
                     const existing = memoryDb.mistakes.find(mk => mk.userId === userId && mk.question === m.question);
@@ -640,13 +492,21 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                     }
                 });
             }
+
             const user = memoryDb.users.find(u => u.uid === userId);
             if(user) {
+                // Simple Memory Aggregation Logic
                 user.points = (user.points || 0) + (resultData.correct * 10) + 20;
                 user.totalExams = (user.totalExams || 0) + 1;
+                
                 if (!user.stats) user.stats = { totalCorrect:0, totalWrong:0, totalSkipped:0, subjectStats: {}, topicStats: {} };
                 user.stats.totalCorrect += resultData.correct;
                 user.stats.totalWrong += resultData.wrong;
+                
+                const subj = resultData.subject;
+                if(!user.stats.subjectStats[subj]) user.stats.subjectStats[subj] = { correct: 0, total: 0 };
+                user.stats.subjectStats[subj].correct += resultData.correct;
+                user.stats.subjectStats[subj].total += resultData.totalQuestions;
             }
         }
         res.json({ success: true });
@@ -655,6 +515,79 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
         res.status(500).json({ error: 'Failed' }); 
     }
 });
+
+// --- MISTAKE MANAGEMENT ---
+
+app.get('/api/users/:userId/mistakes', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (isDbConnected()) {
+            const mistakes = await Mistake.find({ userId }).sort({ lastMissed: -1 }).limit(100);
+            res.json(mistakes);
+        } else {
+            res.json(memoryDb.mistakes.filter(m => m.userId === userId));
+        }
+    } catch (e) { res.status(500).json({ error: 'Failed to fetch mistakes' }); }
+});
+
+app.delete('/api/users/:userId/mistakes/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (isDbConnected()) {
+            await Mistake.findByIdAndDelete(id);
+        } else {
+            memoryDb.mistakes = memoryDb.mistakes.filter(m => m._id !== id);
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: 'Failed to delete mistake' }); }
+});
+
+// --- SAVED QUESTIONS ---
+
+app.get('/api/users/:userId/saved-questions', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (isDbConnected()) {
+            const saved = await SavedQuestion.find({ userId }).populate('questionId');
+            res.json(saved);
+        } else {
+            res.json(memoryDb.savedQuestions.filter(sq => sq.userId === userId));
+        }
+    } catch(e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.post('/api/users/:userId/saved-questions', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { questionId } = req.body;
+        
+        if (isDbConnected()) {
+            const exists = await SavedQuestion.findOne({ userId, questionId });
+            if (exists) {
+                await SavedQuestion.deleteOne({ userId, questionId });
+                res.json({ status: 'REMOVED' });
+            } else {
+                await new SavedQuestion({ userId, questionId }).save();
+                res.json({ status: 'SAVED' });
+            }
+        } else {
+            // Memory fallback incomplete for refs, simplified
+            res.json({ status: 'SAVED_MEMORY' });
+        }
+    } catch(e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (isDbConnected()) {
+            await SavedQuestion.findByIdAndDelete(id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- ADMIN PAYMENTS ---
 
 app.get('/api/admin/payments', async (req, res) => {
   try {
@@ -709,6 +642,8 @@ app.delete('/api/admin/payments/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
+// --- ADMIN NOTIFICATIONS ---
+
 app.get('/api/notifications', async (req, res) => {
   try {
     if (isDbConnected()) {
@@ -734,6 +669,8 @@ app.post('/api/admin/notifications', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
+// --- LEADERBOARD ---
+
 app.get('/api/leaderboard', async (req, res) => {
     try {
         if (isDbConnected()) {
@@ -745,10 +682,12 @@ app.get('/api/leaderboard', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
+// --- EXAM PACKS ---
 app.get('/api/exam-packs', async (req, res) => {
     try {
         if (isDbConnected()) {
             const packs = await ExamPack.find();
+            // If DB is empty, insert defaults
             if (packs.length === 0) {
                await ExamPack.insertMany(memoryDb.examPacks);
                return res.json(memoryDb.examPacks);
@@ -758,6 +697,296 @@ app.get('/api/exam-packs', async (req, res) => {
             res.json(memoryDb.examPacks);
         }
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- QUESTION BANK & SYLLABUS STATS ---
+
+app.get('/api/quiz/syllabus-stats', async (req, res) => {
+    try {
+        let stats = {};
+        
+        if (isDbConnected()) {
+            // Aggregation pipeline to count questions per subject/chapter/topic
+            const agg = await QuestionBank.aggregate([
+                {
+                    $group: {
+                        _id: { subject: "$subject", chapter: "$chapter", topic: "$topic" },
+                        count: { $sum: 1 }
+                    }
+                }
+            ]);
+
+            // Transform aggregation result to nested structure
+            agg.forEach(item => {
+                const { subject, chapter, topic } = item._id;
+                const count = item.count;
+
+                if (!stats[subject]) stats[subject] = { total: 0, chapters: {} };
+                stats[subject].total += count;
+
+                if (!stats[subject].chapters[chapter]) stats[subject].chapters[chapter] = { total: 0, topics: {} };
+                stats[subject].chapters[chapter].total += count;
+
+                if (topic) {
+                    stats[subject].chapters[chapter].topics[topic] = count;
+                }
+            });
+        } else {
+            // Memory Fallback
+            memoryDb.questions.forEach(q => {
+                const { subject, chapter, topic } = q;
+                if (!stats[subject]) stats[subject] = { total: 0, chapters: {} };
+                stats[subject].total++;
+                if (!stats[subject].chapters[chapter]) stats[subject].chapters[chapter] = { total: 0, topics: {} };
+                stats[subject].chapters[chapter].total++;
+                if (topic) stats[subject].chapters[chapter].topics[topic] = (stats[subject].chapters[chapter].topics[topic] || 0) + 1;
+            });
+        }
+        
+        res.json(stats);
+    } catch (e) {
+        console.error("Stats Error:", e);
+        res.status(500).json({ error: 'Failed to fetch stats' });
+    }
+});
+
+app.post('/api/admin/questions/bulk', async (req, res) => {
+  try {
+    const { questions } = req.body;
+    if (isDbConnected()) {
+      const ops = questions.map(q => ({
+        updateOne: {
+          filter: { question: q.question }, // Avoid duplicates by question text
+          update: { $set: q },
+          upsert: true
+        }
+      }));
+      await QuestionBank.bulkWrite(ops);
+    } else {
+      memoryDb.questions.push(...questions);
+    }
+    res.json({ success: true });
+  } catch (e) { 
+      console.error(e);
+      res.status(500).json({ error: e.message }); 
+  }
+});
+
+app.get('/api/admin/questions', async (req, res) => {
+    try {
+        const { page = 1, limit = 10, subject, chapter } = req.query;
+        const query = {};
+        if (subject) query.subject = subject;
+        if (chapter) query.chapter = chapter;
+
+        if (isDbConnected()) {
+            const questions = await QuestionBank.find(query)
+                .sort({ createdAt: -1 })
+                .skip((page - 1) * limit)
+                .limit(parseInt(limit));
+            const total = await QuestionBank.countDocuments(query);
+            res.json({ questions, total });
+        } else {
+            res.json({ questions: memoryDb.questions.slice(0, 10), total: memoryDb.questions.length });
+        }
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.delete('/api/admin/questions/:id', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            await QuestionBank.findByIdAndDelete(req.params.id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: 'Failed'}); }
+});
+
+app.post('/api/quiz/generate-from-db', async (req, res) => {
+    try {
+        const { subject, chapter, topics, count } = req.body;
+        
+        if (isDbConnected()) {
+            const pipeline = [
+                { 
+                    $match: { 
+                        subject, 
+                        chapter,
+                        topic: { $in: topics }
+                    } 
+                },
+                { $sample: { size: count } }
+            ];
+            const questions = await QuestionBank.aggregate(pipeline);
+            res.json(questions);
+        } else {
+            // Simple memory filter
+            const filtered = memoryDb.questions.filter(q => 
+                q.subject === subject && 
+                q.chapter === chapter && 
+                topics.includes(q.topic)
+            );
+            res.json(filtered.slice(0, count));
+        }
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+// --- BATTLE ROUTES ---
+
+app.post('/api/battles/create', async (req, res) => {
+  try {
+    const { userId, userName, avatar, config } = req.body;
+    const roomId = Math.floor(100000 + Math.random() * 900000).toString(); 
+    
+    // Fetch Questions
+    let questions = [];
+    if (isDbConnected()) {
+        const pipeline = [
+            { $match: { subject: config.subject } },
+            { $sample: { size: config.questionCount } }
+        ];
+        questions = await QuestionBank.aggregate(pipeline);
+    }
+    
+    // Fallback if DB empty or Memory mode
+    if (questions.length < config.questionCount) {
+        questions = BATTLE_QUESTIONS_FALLBACK.slice(0, config.questionCount);
+    }
+
+    const battleData = {
+      roomId,
+      hostId: userId,
+      config,
+      questions,
+      players: [{ uid: userId, name: userName, avatar, score: 0, team: config.mode === '2v2' ? 'A' : 'NONE' }],
+      status: 'WAITING'
+    };
+
+    if (isDbConnected()) {
+      const battle = new Battle(battleData);
+      await battle.save();
+    } else {
+      memoryDb.battles.push(battleData);
+    }
+    res.json({ roomId });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to create battle' });
+  }
+});
+
+app.post('/api/battles/join', async (req, res) => {
+  try {
+    const { roomId, userId, userName, avatar } = req.body;
+    
+    let battle;
+    if (isDbConnected()) {
+        battle = await Battle.findOne({ roomId });
+    } else {
+        battle = memoryDb.battles.find(b => b.roomId === roomId);
+    }
+
+    if (!battle) return res.status(404).json({ error: 'Room not found' });
+    if (battle.status !== 'WAITING') return res.status(400).json({ error: 'Game already started' });
+
+    const limit = battle.config.mode === '1v1' ? 2 : battle.config.mode === '2v2' ? 4 : 5;
+    if (battle.players.length >= limit) return res.status(400).json({ error: 'Room is full' });
+
+    const exists = battle.players.find(p => p.uid === userId);
+    if (!exists) {
+        let team = 'NONE';
+        if (battle.config.mode === '2v2') {
+            const teamA = battle.players.filter(p => p.team === 'A').length;
+            const teamB = battle.players.filter(p => p.team === 'B').length;
+            team = teamA <= teamB ? 'A' : 'B';
+        }
+
+        const newPlayer = { uid: userId, name: userName, avatar, score: 0, team };
+        
+        if (isDbConnected()) {
+            battle.players.push(newPlayer);
+            await battle.save();
+        } else {
+            battle.players.push(newPlayer);
+        }
+    }
+
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to join battle' });
+  }
+});
+
+app.post('/api/battles/start', async (req, res) => {
+    try {
+        const { roomId, userId } = req.body;
+        
+        let battle;
+        if (isDbConnected()) {
+            battle = await Battle.findOne({ roomId });
+        } else {
+            battle = memoryDb.battles.find(b => b.roomId === roomId);
+        }
+
+        if (!battle) return res.status(404).json({ error: 'Room not found' });
+        if (battle.hostId !== userId) return res.status(403).json({ error: 'Only host can start' });
+
+        if (isDbConnected()) {
+            battle.status = 'ACTIVE';
+            battle.startTime = Date.now();
+            await battle.save();
+        } else {
+            battle.status = 'ACTIVE';
+            battle.startTime = Date.now();
+        }
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: 'Failed to start game' });
+    }
+});
+
+app.get('/api/battles/:roomId', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    let battle;
+    if (isDbConnected()) {
+      battle = await Battle.findOne({ roomId });
+    } else {
+      battle = memoryDb.battles.find(b => b.roomId === roomId);
+    }
+    
+    if (!battle) return res.status(404).json({ error: 'Battle not found' });
+    res.json(battle);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to fetch battle state' });
+  }
+});
+
+app.post('/api/battles/:roomId/answer', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const { userId, isCorrect } = req.body;
+    const inc = isCorrect ? 10 : 0;
+    
+    if (isDbConnected()) {
+      const battle = await Battle.findOne({ roomId });
+      if (!battle) return res.status(404).json({ error: 'Battle not found' });
+      
+      const playerIndex = battle.players.findIndex(p => p.uid === userId);
+      if (playerIndex > -1) {
+          battle.players[playerIndex].score += inc;
+          await battle.save();
+      }
+      res.json({ success: true });
+    } else {
+      const battle = memoryDb.battles.find(b => b.roomId === roomId);
+      if (!battle) return res.status(404).json({ error: 'Battle not found' });
+      const player = battle.players.find(p => p.uid === userId);
+      if (player) player.score += inc;
+      res.json({ success: true });
+    }
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to submit answer' });
+  }
 });
 
 const PORT = process.env.PORT || 5000;
