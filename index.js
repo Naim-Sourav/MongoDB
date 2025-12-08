@@ -1,7 +1,7 @@
-
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const { GoogleGenAI, Type } = require("@google/genai");
 require('dotenv').config();
 
 const app = express();
@@ -14,6 +14,19 @@ app.use(cors());
 // --- MongoDB Connection Setup ---
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://user:pass@cluster0.mongodb.net/shikkha-shohayok?retryWrites=true&w=majority';
 
+// API Key Rotation Pool (Synced with Frontend)
+const API_KEYS = [
+  process.env.API_KEY,
+  "AIzaSyBNJxFT8X1ldhADeCUNXpRp-b2k2uM2RIw",
+  "AIzaSyA3Z-b1YZfuHc-e2leBTOiKkGWLawLsRvw",
+  "AIzaSyBgVW3lgdx67iuDAdzT1AXFXx5RNmeJXt0"
+].filter(key => key && key.startsWith('AIzaSy'));
+
+const getGeminiClient = () => {
+  const apiKey = API_KEYS[Math.floor(Math.random() * API_KEYS.length)];
+  return new GoogleGenAI({ apiKey: apiKey || '' });
+};
+
 // In-Memory Fallback Storage
 const memoryDb = {
   users: [],
@@ -24,7 +37,7 @@ const memoryDb = {
   battles: [],
   questions: [],
   savedQuestions: [],
-  mistakes: [], // Added for mistakes
+  mistakes: [], 
   examResults: [],
   examPacks: [
     {
@@ -71,7 +84,8 @@ const memoryDb = {
       theme: 'orange',
       tag: 'Popular'
     }
-  ]
+  ],
+  tasks: [] // For generation tasks
 };
 
 // Connect to MongoDB
@@ -87,43 +101,27 @@ const isDbConnected = () => mongoose.connection.readyState === 1;
 
 // --- Schemas & Models (Mongoose) ---
 
-// Optimized User Schema with embedded stats
 const userSchema = new mongoose.Schema({
   uid: { type: String, required: true, unique: true },
   email: String,
   displayName: String,
   photoURL: String,
   role: { type: String, default: 'student' },
-  // Extended Profile
   college: String,
   hscBatch: String,
   department: String,
   target: String,
-  
   points: { type: Number, default: 0 },
   totalExams: { type: Number, default: 0 },
   lastLogin: { type: Number, default: Date.now },
   createdAt: { type: Number, default: Date.now },
-
-  // --- OPTIMIZATION START: Denormalized Stats ---
-  // Storing aggregated stats directly in User doc to avoid expensive queries on ExamResult
   stats: {
     totalCorrect: { type: Number, default: 0 },
     totalWrong: { type: Number, default: 0 },
     totalSkipped: { type: Number, default: 0 },
-    // Maps allow us to store dynamic keys (Subject Names / Topic Names)
-    subjectStats: { 
-      type: Map, 
-      of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), 
-      default: {} 
-    },
-    topicStats: { 
-      type: Map, 
-      of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), 
-      default: {} 
-    }
+    subjectStats: { type: Map, of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), default: {} },
+    topicStats: { type: Map, of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), default: {} }
   }
-  // --- OPTIMIZATION END ---
 });
 const User = mongoose.model('User', userSchema);
 
@@ -195,7 +193,6 @@ const savedQuestionSchema = new mongoose.Schema({
 savedQuestionSchema.index({ userId: 1 });
 const SavedQuestion = mongoose.model('SavedQuestion', savedQuestionSchema);
 
-// Mistake Schema - Stores full question content
 const mistakeSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   question: { type: String, required: true },
@@ -205,7 +202,7 @@ const mistakeSchema = new mongoose.Schema({
   subject: String,
   chapter: String,
   topic: String,
-  wrongCount: { type: Number, default: 1 }, // How many times got this wrong
+  wrongCount: { type: Number, default: 1 },
   lastMissed: { type: Number, default: Date.now }
 });
 mistakeSchema.index({ userId: 1 });
@@ -219,15 +216,9 @@ const examResultSchema = new mongoose.Schema({
   wrong: Number,
   skipped: Number,
   score: Number,
-  // Detailed Analysis
-  topicStats: [{
-    topic: String,
-    correct: Number,
-    total: Number
-  }],
+  topicStats: [{ topic: String, correct: Number, total: Number }],
   timestamp: { type: Number, default: Date.now }
 });
-// Index for faster lookups if we ever need to rebuild stats
 examResultSchema.index({ userId: 1 }); 
 const ExamResult = mongoose.model('ExamResult', examResultSchema);
 
@@ -244,19 +235,207 @@ const examPackSchema = new mongoose.Schema({
 });
 const ExamPack = mongoose.model('ExamPack', examPackSchema);
 
+// Generation Task Schema
+const generationTaskSchema = new mongoose.Schema({
+  status: { type: String, enum: ['QUEUED', 'PROCESSING', 'COMPLETED', 'FAILED'], default: 'QUEUED' },
+  subject: String,
+  chapter: String,
+  totalTarget: Number,
+  generatedCount: { type: Number, default: 0 },
+  batches: Array, // Stores the configuration for this run
+  standard: String,
+  logs: [String],
+  createdAt: { type: Number, default: Date.now },
+  updatedAt: { type: Number, default: Date.now }
+});
+const GenerationTask = mongoose.model('GenerationTask', generationTaskSchema);
+
 // Static Question Pool for Fallback
 const BATTLE_QUESTIONS_FALLBACK = [
   { question: "নিচের কোনটি ভেক্টর রাশি?", options: ["কাজ", "শক্তি", "বেগ", "তাপমাত্রা"], correctAnswerIndex: 2, subject: "Physics" },
   { question: "পানির রাসায়নিক সংকেত কোনটি?", options: ["HO2", "H2O", "H2O2", "OH"], correctAnswerIndex: 1, subject: "Chemistry" },
-  { question: "নিউটনের গতির সূত্র কয়টি?", options: ["২টি", "৩টি", "৪টি", "৫টি"], correctAnswerIndex: 1, subject: "Physics" },
-  { question: "DNA এর পূর্ণরূপ কী?", options: ["Deoxyribonucleic Acid", "Dyno Acid", "Dual Acid", "None"], correctAnswerIndex: 0, subject: "Biology" },
-  { question: "কোষের পাওয়ার হাউস কোনটি?", options: ["নিউক্লিয়াস", "মাইটোকন্ড্রিয়া", "প্লাস্টিড", "রাইবোজোম"], correctAnswerIndex: 1, subject: "Biology" }
 ];
 
 // --- ROUTES ---
 
 app.get('/', (req, res) => {
   res.send(`🚀 Shikkha Shohayok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
+});
+
+// --- GENERATION WORKER (Backend AI Logic) ---
+
+const generateBatchQuestions = async (config, standard, count, instruction, temp) => {
+  const ai = getGeminiClient();
+  const prompt = `Generate exactly ${count} MCQ questions based on:
+  Subject: ${config.subject}
+  Chapter: ${config.chapter}
+  Topic: ${config.topics.join(', ')}
+  Exam Standard: ${standard}
+  
+  Instructions:
+  ${instruction}
+  
+  Format:
+  Output strictly in JSON format array.
+  Each object: { "question": "...", "options": ["...", "...", "...", "..."], "correctAnswerIndex": 0-3, "explanation": "..." }
+  Language: Bengali (Standard NCTB).
+  IMPORTANT: Return EXACTLY ${count} questions.`;
+
+  const responseSchema = {
+    type: Type.ARRAY,
+    items: {
+      type: Type.OBJECT,
+      properties: {
+        question: { type: Type.STRING },
+        options: { type: Type.ARRAY, items: { type: Type.STRING } },
+        correctAnswerIndex: { type: Type.INTEGER },
+        explanation: { type: Type.STRING },
+      },
+      required: ["question", "options", "correctAnswerIndex", "explanation"]
+    }
+  };
+
+  const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"];
+  
+  for (const model of models) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: { responseMimeType: 'application/json', responseSchema, temperature: temp }
+      });
+      if (response.text) {
+        return JSON.parse(response.text.replace(/```json/g, '').replace(/```/g, '').trim());
+      }
+    } catch (e) {
+      console.warn(`Model ${model} failed`, e.message);
+    }
+  }
+  throw new Error("All models failed");
+};
+
+const processGenerationTask = async (taskId, taskData) => {
+  console.log(`Starting background task ${taskId}`);
+  
+  // Helper to update progress
+  const updateTask = async (updates) => {
+    if (isDbConnected()) {
+      await GenerationTask.findByIdAndUpdate(taskId, { ...updates, updatedAt: Date.now() });
+    } else {
+      const t = memoryDb.tasks.find(t => t._id === taskId);
+      if(t) Object.assign(t, updates, { updatedAt: Date.now() });
+    }
+  };
+
+  await updateTask({ status: 'PROCESSING' });
+
+  try {
+    for (const batch of taskData.batches) {
+      const { topic, count, instruction, difficulty, temp } = batch;
+      
+      // Process in smaller chunks to avoid timeout
+      let remaining = count;
+      while (remaining > 0) {
+        const chunk = Math.min(remaining, 5); // 5 at a time
+        try {
+          const questions = await generateBatchQuestions(
+            { subject: taskData.subject, chapter: taskData.chapter, topics: [topic] },
+            taskData.standard,
+            chunk,
+            instruction,
+            temp
+          );
+
+          // Enhance and Save
+          const enhancedQuestions = questions.map(q => ({
+            ...q,
+            subject: taskData.subject,
+            chapter: taskData.chapter,
+            topic: topic,
+            difficulty: difficulty,
+            createdAt: Date.now()
+          }));
+
+          if (isDbConnected()) {
+            await QuestionBank.insertMany(enhancedQuestions);
+            await GenerationTask.findByIdAndUpdate(taskId, { $inc: { generatedCount: enhancedQuestions.length } });
+          } else {
+            memoryDb.questions.push(...enhancedQuestions);
+            const t = memoryDb.tasks.find(t => t._id === taskId);
+            if(t) t.generatedCount += enhancedQuestions.length;
+          }
+
+        } catch (err) {
+          console.error(`Batch failed for ${topic}:`, err.message);
+          // Log error but continue
+          const logMsg = `Failed batch for ${topic}: ${err.message}`;
+          if (isDbConnected()) {
+             await GenerationTask.findByIdAndUpdate(taskId, { $push: { logs: logMsg } });
+          } else {
+             const t = memoryDb.tasks.find(t => t._id === taskId);
+             if(t) t.logs.push(logMsg);
+          }
+        }
+        remaining -= chunk;
+        await new Promise(r => setTimeout(r, 2000)); // Cool down
+      }
+    }
+    await updateTask({ status: 'COMPLETED' });
+  } catch (err) {
+    console.error("Task failed completely", err);
+    await updateTask({ status: 'FAILED', logs: [err.message] });
+  }
+};
+
+app.post('/api/admin/generate-background', async (req, res) => {
+  try {
+    const { subject, chapter, standard, batches } = req.body;
+    const totalTarget = batches.reduce((acc, b) => acc + b.count, 0);
+
+    const taskData = {
+      subject, chapter, standard, batches, totalTarget, 
+      status: 'QUEUED', generatedCount: 0, logs: []
+    };
+
+    let taskId;
+    if (isDbConnected()) {
+      const task = new GenerationTask(taskData);
+      await task.save();
+      taskId = task._id;
+    } else {
+      taskId = Date.now().toString();
+      memoryDb.tasks.push({ ...taskData, _id: taskId });
+    }
+
+    // Trigger Background Processing (Fire & Forget)
+    processGenerationTask(taskId, taskData);
+
+    res.json({ success: true, taskId, message: "Background generation started" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/tasks', async (req, res) => {
+  try {
+    if (isDbConnected()) {
+      const tasks = await GenerationTask.find().sort({ createdAt: -1 }).limit(10);
+      res.json(tasks);
+    } else {
+      res.json(memoryDb.tasks.sort((a,b) => b.createdAt - a.createdAt).slice(0, 10));
+    }
+  } catch (e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.delete('/api/admin/tasks/:id', async (req, res) => {
+  try {
+    if (isDbConnected()) {
+      await GenerationTask.findByIdAndDelete(req.params.id);
+    } else {
+      memoryDb.tasks = memoryDb.tasks.filter(t => t._id !== req.params.id);
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: 'Failed' }); }
 });
 
 // --- ADMIN STATS AGGREGATION ---
@@ -296,81 +475,6 @@ app.get('/api/admin/stats', async (req, res) => {
   } catch (e) {
       res.status(500).json({ error: 'Stats failed' });
   }
-});
-
-// --- TAXONOMY (Subjects & Chapters) ---
-app.get('/api/admin/taxonomy', async (req, res) => {
-    try {
-        let subjects = [];
-        let chapters = {};
-
-        if (isDbConnected()) {
-            const distinctSubjects = await QuestionBank.distinct('subject');
-            subjects = distinctSubjects.sort();
-
-            for (const sub of subjects) {
-                const distinctChapters = await QuestionBank.distinct('chapter', { subject: sub });
-                chapters[sub] = distinctChapters.sort();
-            }
-        } else {
-            // Memory fallback
-            const distinctSubjects = [...new Set(memoryDb.questions.map(q => q.subject))];
-            subjects = distinctSubjects.sort();
-            for (const sub of subjects) {
-                const distinctChapters = [...new Set(memoryDb.questions.filter(q => q.subject === sub).map(q => q.chapter))];
-                chapters[sub] = distinctChapters.sort();
-            }
-        }
-        res.json({ subjects, chapters });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: 'Failed to fetch taxonomy' });
-    }
-});
-
-// --- MAINTENANCE ENDPOINTS ---
-app.post('/api/admin/maintenance/rename', async (req, res) => {
-    try {
-        const { target, newName } = req.body;
-        if (!target || !newName) return res.status(400).json({ error: 'Missing params' });
-
-        if (isDbConnected()) {
-            const result = await QuestionBank.updateMany(
-                { subject: target },
-                { $set: { subject: newName } }
-            );
-            res.json({ success: true, modified: result.modifiedCount });
-        } else {
-            let count = 0;
-            memoryDb.questions.forEach(q => {
-                if (q.subject === target) {
-                    q.subject = newName;
-                    count++;
-                }
-            });
-            res.json({ success: true, modified: count });
-        }
-    } catch (e) {
-        res.status(500).json({ error: 'Rename failed' });
-    }
-});
-
-app.post('/api/admin/maintenance/delete-subject', async (req, res) => {
-    try {
-        const { subject } = req.body;
-        if (!subject) return res.status(400).json({ error: 'Missing subject' });
-
-        if (isDbConnected()) {
-            const result = await QuestionBank.deleteMany({ subject });
-            res.json({ success: true, deleted: result.deletedCount });
-        } else {
-            const initialLen = memoryDb.questions.length;
-            memoryDb.questions = memoryDb.questions.filter(q => q.subject !== subject);
-            res.json({ success: true, deleted: initialLen - memoryDb.questions.length });
-        }
-    } catch (e) {
-        res.status(500).json({ error: 'Delete failed' });
-    }
 });
 
 // --- USER MANAGEMENT ---
@@ -418,7 +522,6 @@ app.get('/api/users/:userId/enrollments', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Fetch enrollments failed' }); }
 });
 
-// --- OPTIMIZED GET STATS ---
 app.get('/api/users/:userId/stats', async (req, res) => {
     const { userId } = req.params;
     try {
@@ -431,13 +534,9 @@ app.get('/api/users/:userId/stats', async (req, res) => {
 
         if (!user) return res.json({ points: 0, totalExams: 0 });
 
-        // Self-Healing Logic Omitted for brevity, kept structure same as original
-
-        // --- Fast Read Logic ---
         let subjectBreakdown = [];
         let topicBreakdown = [];
 
-        // Handle Map vs Object (Mongoose Map vs Memory Object)
         const subjStatsObj = user.stats?.subjectStats instanceof Map 
             ? Object.fromEntries(user.stats.subjectStats) 
             : (user.stats?.subjectStats || {});
@@ -446,13 +545,11 @@ app.get('/api/users/:userId/stats', async (req, res) => {
             ? Object.fromEntries(user.stats.topicStats) 
             : (user.stats?.topicStats || {});
 
-        // Convert Subject Stats to Array
         subjectBreakdown = Object.keys(subjStatsObj).map(s => ({
             subject: s,
             accuracy: (subjStatsObj[s].correct / subjStatsObj[s].total) * 100
         })).sort((a,b) => b.accuracy - a.accuracy);
 
-        // Convert Topic Stats to Array
         topicBreakdown = Object.keys(topicStatsObj).map(t => ({
             topic: t,
             accuracy: (topicStatsObj[t].correct / topicStatsObj[t].total) * 100,
@@ -485,52 +582,37 @@ app.get('/api/users/:userId/stats', async (req, res) => {
     }
 });
 
-// --- OPTIMIZED POST EXAM (Write-Heavy) with MISTAKE LOGGING ---
 app.post('/api/users/:userId/exam-results', async (req, res) => {
     try {
         const { userId } = req.params;
-        // mistakes is an array of full question objects
         const { mistakes, ...resultData } = req.body; 
         const examResultData = { userId, ...resultData, timestamp: Date.now() };
         
         if (isDbConnected()) {
-            // 1. Save the detailed result
             await new ExamResult(examResultData).save();
             
-            // 2. Save Mistakes
             if (mistakes && mistakes.length > 0) {
                 const bulkOps = mistakes.map(m => ({
                     updateOne: {
-                        filter: { userId, question: m.question }, // Identify by unique question text per user
-                        update: { 
-                            $set: { 
-                                ...m, 
-                                userId,
-                                lastMissed: Date.now() 
-                            },
-                            $inc: { wrongCount: 1 } 
-                        },
+                        filter: { userId, question: m.question },
+                        update: { $set: { ...m, userId, lastMissed: Date.now() }, $inc: { wrongCount: 1 } },
                         upsert: true
                     }
                 }));
                 await Mistake.bulkWrite(bulkOps);
             }
 
-            // 3. Determine User Update Operation (Aggregated Stats)
             const user = await User.findOne({ uid: userId });
             
             if (user) {
-                // Initialize stats if missing
                 if (!user.stats) user.stats = { totalCorrect:0, totalWrong:0, totalSkipped:0, subjectStats: {}, topicStats: {} };
                 
-                // Update Global Totals
                 user.points = (user.points || 0) + (resultData.correct * 10) + 20; 
                 user.totalExams = (user.totalExams || 0) + 1;
                 user.stats.totalCorrect = (user.stats.totalCorrect || 0) + resultData.correct;
                 user.stats.totalWrong = (user.stats.totalWrong || 0) + resultData.wrong;
                 user.stats.totalSkipped = (user.stats.totalSkipped || 0) + (resultData.skipped || 0);
 
-                // Update Subject Stats
                 const subj = resultData.subject;
                 const currentSubjStat = user.stats.subjectStats.get(subj) || { correct: 0, total: 0 };
                 user.stats.subjectStats.set(subj, {
@@ -538,7 +620,6 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                     total: currentSubjStat.total + resultData.totalQuestions
                 });
 
-                // Update Topic Stats
                 if (resultData.topicStats && Array.isArray(resultData.topicStats)) {
                     resultData.topicStats.forEach(ts => {
                         const topicName = ts.topic;
@@ -553,10 +634,7 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                 await user.save();
             }
         } else {
-            // Memory Mode
             memoryDb.examResults.push(examResultData);
-            
-            // Memory Mistakes
             if (mistakes && mistakes.length > 0) {
                 mistakes.forEach(m => {
                     const existing = memoryDb.mistakes.find(mk => mk.userId === userId && mk.question === m.question);
@@ -568,21 +646,13 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                     }
                 });
             }
-
             const user = memoryDb.users.find(u => u.uid === userId);
             if(user) {
-                // Simple Memory Aggregation Logic
                 user.points = (user.points || 0) + (resultData.correct * 10) + 20;
                 user.totalExams = (user.totalExams || 0) + 1;
-                
                 if (!user.stats) user.stats = { totalCorrect:0, totalWrong:0, totalSkipped:0, subjectStats: {}, topicStats: {} };
                 user.stats.totalCorrect += resultData.correct;
                 user.stats.totalWrong += resultData.wrong;
-                
-                const subj = resultData.subject;
-                if(!user.stats.subjectStats[subj]) user.stats.subjectStats[subj] = { correct: 0, total: 0 };
-                user.stats.subjectStats[subj].correct += resultData.correct;
-                user.stats.subjectStats[subj].total += resultData.totalQuestions;
             }
         }
         res.json({ success: true });
@@ -591,8 +661,6 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
         res.status(500).json({ error: 'Failed' }); 
     }
 });
-
-// --- MISTAKE MANAGEMENT ---
 
 app.get('/api/users/:userId/mistakes', async (req, res) => {
     try {
@@ -603,7 +671,7 @@ app.get('/api/users/:userId/mistakes', async (req, res) => {
         } else {
             res.json(memoryDb.mistakes.filter(m => m.userId === userId));
         }
-    } catch (e) { res.status(500).json({ error: 'Failed to fetch mistakes' }); }
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
 app.delete('/api/users/:userId/mistakes/:id', async (req, res) => {
@@ -615,10 +683,8 @@ app.delete('/api/users/:userId/mistakes/:id', async (req, res) => {
             memoryDb.mistakes = memoryDb.mistakes.filter(m => m._id !== id);
         }
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Failed to delete mistake' }); }
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
-
-// --- SAVED QUESTIONS ---
 
 app.get('/api/users/:userId/saved-questions', async (req, res) => {
     try {
@@ -647,7 +713,6 @@ app.post('/api/users/:userId/saved-questions', async (req, res) => {
                 res.json({ status: 'SAVED' });
             }
         } else {
-            // Memory fallback incomplete for refs, simplified
             res.json({ status: 'SAVED_MEMORY' });
         }
     } catch(e) { res.status(500).json({ error: 'Failed' }); }
@@ -662,8 +727,6 @@ app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: 'Failed' }); }
 });
-
-// --- ADMIN PAYMENTS ---
 
 app.get('/api/admin/payments', async (req, res) => {
   try {
@@ -718,8 +781,6 @@ app.delete('/api/admin/payments/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
-// --- ADMIN NOTIFICATIONS ---
-
 app.get('/api/notifications', async (req, res) => {
   try {
     if (isDbConnected()) {
@@ -745,8 +806,6 @@ app.post('/api/admin/notifications', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
-// --- LEADERBOARD ---
-
 app.get('/api/leaderboard', async (req, res) => {
     try {
         if (isDbConnected()) {
@@ -758,12 +817,10 @@ app.get('/api/leaderboard', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
-// --- EXAM PACKS ---
 app.get('/api/exam-packs', async (req, res) => {
     try {
         if (isDbConnected()) {
             const packs = await ExamPack.find();
-            // If DB is empty, insert defaults
             if (packs.length === 0) {
                await ExamPack.insertMany(memoryDb.examPacks);
                return res.json(memoryDb.examPacks);
@@ -775,14 +832,10 @@ app.get('/api/exam-packs', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
-// --- QUESTION BANK & SYLLABUS STATS ---
-
 app.get('/api/quiz/syllabus-stats', async (req, res) => {
     try {
         let stats = {};
-        
         if (isDbConnected()) {
-            // Aggregation pipeline to count questions per subject/chapter/topic
             const agg = await QuestionBank.aggregate([
                 {
                     $group: {
@@ -791,24 +844,16 @@ app.get('/api/quiz/syllabus-stats', async (req, res) => {
                     }
                 }
             ]);
-
-            // Transform aggregation result to nested structure
             agg.forEach(item => {
                 const { subject, chapter, topic } = item._id;
                 const count = item.count;
-
                 if (!stats[subject]) stats[subject] = { total: 0, chapters: {} };
                 stats[subject].total += count;
-
                 if (!stats[subject].chapters[chapter]) stats[subject].chapters[chapter] = { total: 0, topics: {} };
                 stats[subject].chapters[chapter].total += count;
-
-                if (topic) {
-                    stats[subject].chapters[chapter].topics[topic] = count;
-                }
+                if (topic) stats[subject].chapters[chapter].topics[topic] = count;
             });
         } else {
-            // Memory Fallback
             memoryDb.questions.forEach(q => {
                 const { subject, chapter, topic } = q;
                 if (!stats[subject]) stats[subject] = { total: 0, chapters: {} };
@@ -818,12 +863,32 @@ app.get('/api/quiz/syllabus-stats', async (req, res) => {
                 if (topic) stats[subject].chapters[chapter].topics[topic] = (stats[subject].chapters[chapter].topics[topic] || 0) + 1;
             });
         }
-        
         res.json(stats);
     } catch (e) {
-        console.error("Stats Error:", e);
         res.status(500).json({ error: 'Failed to fetch stats' });
     }
+});
+
+app.get('/api/admin/taxonomy', async (req, res) => {
+    try {
+        let taxonomy = {};
+        if (isDbConnected()) {
+            const agg = await QuestionBank.aggregate([
+                { $group: { _id: { subject: "$subject", chapter: "$chapter" } } }
+            ]);
+            agg.forEach(item => {
+                const { subject, chapter } = item._id;
+                if(!taxonomy[subject]) taxonomy[subject] = [];
+                taxonomy[subject].push(chapter);
+            });
+        } else {
+            memoryDb.questions.forEach(q => {
+                if(!taxonomy[q.subject]) taxonomy[q.subject] = [];
+                if(!taxonomy[q.subject].includes(q.chapter)) taxonomy[q.subject].push(q.chapter);
+            });
+        }
+        res.json(taxonomy);
+    } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
 app.post('/api/admin/questions/bulk', async (req, res) => {
@@ -832,7 +897,7 @@ app.post('/api/admin/questions/bulk', async (req, res) => {
     if (isDbConnected()) {
       const ops = questions.map(q => ({
         updateOne: {
-          filter: { question: q.question }, // Avoid duplicates by question text
+          filter: { question: q.question },
           update: { $set: q },
           upsert: true
         }
@@ -842,10 +907,7 @@ app.post('/api/admin/questions/bulk', async (req, res) => {
       memoryDb.questions.push(...questions);
     }
     res.json({ success: true });
-  } catch (e) { 
-      console.error(e);
-      res.status(500).json({ error: e.message }); 
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/admin/questions', async (req, res) => {
@@ -880,40 +942,25 @@ app.delete('/api/admin/questions/:id', async (req, res) => {
 app.post('/api/quiz/generate-from-db', async (req, res) => {
     try {
         const { subject, chapter, topics, count } = req.body;
-        
         if (isDbConnected()) {
             const pipeline = [
-                { 
-                    $match: { 
-                        subject, 
-                        chapter,
-                        topic: { $in: topics }
-                    } 
-                },
+                { $match: { subject, chapter, topic: { $in: topics } } },
                 { $sample: { size: count } }
             ];
             const questions = await QuestionBank.aggregate(pipeline);
             res.json(questions);
         } else {
-            // Simple memory filter
-            const filtered = memoryDb.questions.filter(q => 
-                q.subject === subject && 
-                q.chapter === chapter && 
-                topics.includes(q.topic)
-            );
+            const filtered = memoryDb.questions.filter(q => q.subject === subject && q.chapter === chapter && topics.includes(q.topic));
             res.json(filtered.slice(0, count));
         }
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
-
-// --- BATTLE ROUTES ---
 
 app.post('/api/battles/create', async (req, res) => {
   try {
     const { userId, userName, avatar, config } = req.body;
     const roomId = Math.floor(100000 + Math.random() * 900000).toString(); 
     
-    // Fetch Questions
     let questions = [];
     if (isDbConnected()) {
         const pipeline = [
@@ -923,16 +970,12 @@ app.post('/api/battles/create', async (req, res) => {
         questions = await QuestionBank.aggregate(pipeline);
     }
     
-    // Fallback if DB empty or Memory mode
     if (questions.length < config.questionCount) {
         questions = BATTLE_QUESTIONS_FALLBACK.slice(0, config.questionCount);
     }
 
     const battleData = {
-      roomId,
-      hostId: userId,
-      config,
-      questions,
+      roomId, hostId: userId, config, questions,
       players: [{ uid: userId, name: userName, avatar, score: 0, team: config.mode === '2v2' ? 'A' : 'NONE' }],
       status: 'WAITING'
     };
@@ -944,16 +987,12 @@ app.post('/api/battles/create', async (req, res) => {
       memoryDb.battles.push(battleData);
     }
     res.json({ roomId });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Failed to create battle' });
-  }
+  } catch (e) { res.status(500).json({ error: 'Failed to create battle' }); }
 });
 
 app.post('/api/battles/join', async (req, res) => {
   try {
     const { roomId, userId, userName, avatar } = req.body;
-    
     let battle;
     if (isDbConnected()) {
         battle = await Battle.findOne({ roomId });
@@ -975,9 +1014,7 @@ app.post('/api/battles/join', async (req, res) => {
             const teamB = battle.players.filter(p => p.team === 'B').length;
             team = teamA <= teamB ? 'A' : 'B';
         }
-
         const newPlayer = { uid: userId, name: userName, avatar, score: 0, team };
-        
         if (isDbConnected()) {
             battle.players.push(newPlayer);
             await battle.save();
@@ -985,17 +1022,13 @@ app.post('/api/battles/join', async (req, res) => {
             battle.players.push(newPlayer);
         }
     }
-
     res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to join battle' });
-  }
+  } catch (e) { res.status(500).json({ error: 'Failed to join battle' }); }
 });
 
 app.post('/api/battles/start', async (req, res) => {
     try {
         const { roomId, userId } = req.body;
-        
         let battle;
         if (isDbConnected()) {
             battle = await Battle.findOne({ roomId });
@@ -1015,9 +1048,7 @@ app.post('/api/battles/start', async (req, res) => {
             battle.startTime = Date.now();
         }
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: 'Failed to start game' });
-    }
+    } catch (e) { res.status(500).json({ error: 'Failed to start game' }); }
 });
 
 app.get('/api/battles/:roomId', async (req, res) => {
@@ -1029,12 +1060,9 @@ app.get('/api/battles/:roomId', async (req, res) => {
     } else {
       battle = memoryDb.battles.find(b => b.roomId === roomId);
     }
-    
     if (!battle) return res.status(404).json({ error: 'Battle not found' });
     res.json(battle);
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to fetch battle state' });
-  }
+  } catch (e) { res.status(500).json({ error: 'Failed to fetch battle state' }); }
 });
 
 app.post('/api/battles/:roomId/answer', async (req, res) => {
@@ -1042,11 +1070,9 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
     const { roomId } = req.params;
     const { userId, isCorrect } = req.body;
     const inc = isCorrect ? 10 : 0;
-    
     if (isDbConnected()) {
       const battle = await Battle.findOne({ roomId });
       if (!battle) return res.status(404).json({ error: 'Battle not found' });
-      
       const playerIndex = battle.players.findIndex(p => p.uid === userId);
       if (playerIndex > -1) {
           battle.players[playerIndex].score += inc;
@@ -1060,9 +1086,7 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
       if (player) player.score += inc;
       res.json({ success: true });
     }
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to submit answer' });
-  }
+  } catch (e) { res.status(500).json({ error: 'Failed to submit answer' }); }
 });
 
 const PORT = process.env.PORT || 5000;
