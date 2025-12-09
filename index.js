@@ -564,15 +564,21 @@ app.post('/api/users/:userId/saved-questions', async (req, res) => {
         if (isDbConnected()) {
             const exists = await SavedQuestion.findOne({ userId, questionId });
             if (exists) {
-                await SavedQuestion.deleteOne({ userId, questionId });
-                res.json({ status: 'REMOVED' });
+                // CHANGED: Do NOT delete/toggle. Idempotent save.
+                res.json({ status: 'ALREADY_SAVED' });
             } else {
                 await new SavedQuestion({ userId, questionId }).save();
                 res.json({ status: 'SAVED' });
             }
         } else {
-            // Memory fallback incomplete for refs, simplified
-            res.json({ status: 'SAVED_MEMORY' });
+            // Memory fallback
+            const exists = memoryDb.savedQuestions.find(sq => sq.userId === userId && sq.questionId === questionId);
+            if (exists) {
+                 res.json({ status: 'ALREADY_SAVED_MEMORY' });
+            } else {
+                memoryDb.savedQuestions.push({ userId, questionId, savedAt: Date.now(), _id: Date.now().toString() });
+                res.json({ status: 'SAVED_MEMORY' });
+            }
         }
     } catch(e) { res.status(500).json({ error: 'Failed' }); }
 });
@@ -582,6 +588,18 @@ app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
         const { id } = req.params;
         if (isDbConnected()) {
             await SavedQuestion.findByIdAndDelete(id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.delete('/api/users/:userId/saved-questions/by-q/:questionId', async (req, res) => {
+    try {
+        const { userId, questionId } = req.params;
+        if (isDbConnected()) {
+            await SavedQuestion.findOneAndDelete({ userId, questionId });
+        } else {
+            memoryDb.savedQuestions = memoryDb.savedQuestions.filter(sq => !(sq.userId === userId && sq.questionId === questionId));
         }
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: 'Failed' }); }
