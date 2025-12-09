@@ -1,3 +1,4 @@
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -343,7 +344,7 @@ app.get('/api/users/:userId/enrollments', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Fetch enrollments failed' }); }
 });
 
-// --- OPTIMIZED GET STATS ---
+// --- OPTIMIZED GET STATS WITH NORMALIZATION ---
 app.get('/api/users/:userId/stats', async (req, res) => {
     const { userId } = req.params;
     try {
@@ -355,8 +356,6 @@ app.get('/api/users/:userId/stats', async (req, res) => {
         }
 
         if (!user) return res.json({ points: 0, totalExams: 0 });
-
-        // Self-Healing Logic Omitted for brevity, kept structure same as original
 
         // --- Fast Read Logic ---
         let subjectBreakdown = [];
@@ -371,18 +370,45 @@ app.get('/api/users/:userId/stats', async (req, res) => {
             ? Object.fromEntries(user.stats.topicStats) 
             : (user.stats?.topicStats || {});
 
-        // Convert Subject Stats to Array
-        subjectBreakdown = Object.keys(subjStatsObj).map(s => ({
+        // Normalize Subject Stats
+        const normalizeSubject = (sub) => {
+            if (!sub) return 'Unknown';
+            if (sub.includes('Physics') || sub.includes('পদার্থবিজ্ঞান')) return 'Physics';
+            if (sub.includes('Chemistry') || sub.includes('রসায়ন')) return 'Chemistry';
+            if (sub.includes('Math') || sub.includes('গণিত')) return 'Math';
+            if (sub.includes('Biology') || sub.includes('জীববিজ্ঞান')) return 'Biology';
+            if (sub.includes('English')) return 'English';
+            if (sub.includes('Bangla')) return 'Bangla';
+            return sub;
+        };
+
+        const aggregatedSubjects = {};
+        Object.keys(subjStatsObj).forEach(s => {
+            const norm = normalizeSubject(s);
+            if (!aggregatedSubjects[norm]) aggregatedSubjects[norm] = { correct: 0, total: 0 };
+            aggregatedSubjects[norm].correct += subjStatsObj[s].correct;
+            aggregatedSubjects[norm].total += subjStatsObj[s].total;
+        });
+
+        // Convert Normalized Subject Stats to Array
+        subjectBreakdown = Object.keys(aggregatedSubjects).map(s => ({
             subject: s,
-            accuracy: (subjStatsObj[s].correct / subjStatsObj[s].total) * 100
+            accuracy: aggregatedSubjects[s].total > 0 
+                ? (aggregatedSubjects[s].correct / aggregatedSubjects[s].total) * 100 
+                : 0
         })).sort((a,b) => b.accuracy - a.accuracy);
 
         // Convert Topic Stats to Array
         topicBreakdown = Object.keys(topicStatsObj).map(t => ({
             topic: t,
-            accuracy: (topicStatsObj[t].correct / topicStatsObj[t].total) * 100,
+            accuracy: topicStatsObj[t].total > 0 
+                ? (topicStatsObj[t].correct / topicStatsObj[t].total) * 100 
+                : 0,
             total: topicStatsObj[t].total
-        })).sort((a,b) => b.accuracy - a.accuracy);
+        }))
+        // Filter out 'General' or unwanted generic topics if needed
+        .filter(t => t.topic !== 'General' && t.topic !== 'Important Admission Topics')
+        .sort((a,b) => b.accuracy - a.accuracy);
 
         res.json({
             user: {
