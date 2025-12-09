@@ -189,6 +189,7 @@ const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
 const savedQuestionSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'QuestionBank' },
+  folder: { type: String, default: 'General' }, // Added folder support
   savedAt: { type: Number, default: Date.now }
 });
 savedQuestionSchema.index({ userId: 1 });
@@ -559,15 +560,14 @@ app.get('/api/users/:userId/saved-questions', async (req, res) => {
 app.post('/api/users/:userId/saved-questions', async (req, res) => {
     try {
         const { userId } = req.params;
-        const { questionId } = req.body;
+        const { questionId, folder } = req.body; // Accept folder
         
         if (isDbConnected()) {
             const exists = await SavedQuestion.findOne({ userId, questionId });
             if (exists) {
-                // CHANGED: Do NOT delete/toggle. Idempotent save.
                 res.json({ status: 'ALREADY_SAVED' });
             } else {
-                await new SavedQuestion({ userId, questionId }).save();
+                await new SavedQuestion({ userId, questionId, folder: folder || 'General' }).save();
                 res.json({ status: 'SAVED' });
             }
         } else {
@@ -576,11 +576,26 @@ app.post('/api/users/:userId/saved-questions', async (req, res) => {
             if (exists) {
                  res.json({ status: 'ALREADY_SAVED_MEMORY' });
             } else {
-                memoryDb.savedQuestions.push({ userId, questionId, savedAt: Date.now(), _id: Date.now().toString() });
+                memoryDb.savedQuestions.push({ userId, questionId, folder: folder || 'General', savedAt: Date.now(), _id: Date.now().toString() });
                 res.json({ status: 'SAVED_MEMORY' });
             }
         }
     } catch(e) { res.status(500).json({ error: 'Failed' }); }
+});
+
+app.patch('/api/users/:userId/saved-questions/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { folder } = req.body;
+        
+        if (isDbConnected()) {
+            await SavedQuestion.findByIdAndUpdate(id, { folder });
+        } else {
+            const sq = memoryDb.savedQuestions.find(q => q._id === id);
+            if (sq) sq.folder = folder;
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: 'Failed to update folder' }); }
 });
 
 app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
