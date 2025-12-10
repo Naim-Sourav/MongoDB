@@ -616,7 +616,11 @@ app.post('/api/battles/create', async (req, res) => {
         ).slice(0, config.questionCount);
     }
     
-    if (questions.length === 0) return res.status(400).json({ error: 'Not enough questions in database for selected topics.' });
+    if (questions.length === 0) {
+        // Specific message for empty chapters
+        const msg = `নির্বাচিত অধ্যায়গুলোতে কোনো প্রশ্ন পাওয়া যায়নি। দয়া করে অন্য অধ্যায় নির্বাচন করুন।`;
+        return res.status(400).json({ error: msg });
+    }
 
     const battleData = {
       roomId, hostId: userId, config, questions,
@@ -717,10 +721,32 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
         // Save the answer
         if (isDbConnected()) {
             player.answers.set(questionIndex.toString(), selectedOption);
-            await battle.save();
         } else {
             player.answers[questionIndex] = selectedOption;
         }
+
+        // AUTO-SKIP LOGIC: Check if ALL players answered this question
+        // Note: For Map in Mongoose, we need to convert to object to check keys or use .get
+        const allAnswered = battle.players.every(p => {
+            if (isDbConnected()) return p.answers.has(questionIndex.toString());
+            return p.answers[questionIndex] !== undefined;
+        });
+
+        if (allAnswered) {
+            // Logic: The frontend calculates currentQIndex based on elapsed time.
+            // elapsed = (now - start) / 1000.
+            // index = floor(elapsed / duration).
+            // To force jump to next index, we shift startTime back by the remaining time of current question.
+            // We want newElapsed = (questionIndex + 1) * duration + epsilon
+            // So newStart = now - newElapsed * 1000
+            
+            const durationPerQ = battle.config.timePerQuestion;
+            const targetElapsed = (questionIndex + 1) * durationPerQ;
+            // Add a small buffer (0.5s) to ensure index transition
+            battle.startTime = Date.now() - (targetElapsed * 1000) - 500;
+        }
+
+        if (isDbConnected()) await battle.save();
     }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: 'Failed' }); }
