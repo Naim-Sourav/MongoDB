@@ -616,10 +616,9 @@ app.post('/api/battles/create', async (req, res) => {
         ).slice(0, config.questionCount);
     }
     
+    // Check if enough questions found
     if (questions.length === 0) {
-        // Specific message for empty chapters
-        const msg = `নির্বাচিত অধ্যায়গুলোতে কোনো প্রশ্ন পাওয়া যায়নি। দয়া করে অন্য অধ্যায় নির্বাচন করুন।`;
-        return res.status(400).json({ error: msg });
+        return res.status(400).json({ error: 'নির্বাচিত অধ্যায়গুলোতে কোনো প্রশ্ন পাওয়া যায়নি। দয়া করে অন্য অধ্যায় নির্বাচন করুন।' });
     }
 
     const battleData = {
@@ -699,54 +698,61 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
   try {
     const { userId, isCorrect, questionIndex, selectedOption, timeTaken } = req.body;
     let battle;
+    
+    // 1. Fetch current state
     if (isDbConnected()) battle = await Battle.findOne({ roomId: req.params.roomId });
     else battle = memoryDb.battles.find(b => b.roomId === req.params.roomId);
 
     if (!battle) return res.status(404).json({ error: 'Battle not found' });
     const player = battle.players.find(p => p.uid === userId);
     
-    // Convert Map to object for checking (in Mongoose Maps need .get)
+    // Check if already answered using Map (for memory db) or checking key (for Mongoose map)
     let hasAnswered = false;
-    if (player.answers instanceof Map) hasAnswered = player.answers.has(questionIndex.toString());
-    else hasAnswered = player.answers && player.answers[questionIndex] !== undefined;
+    if (isDbConnected()) {
+        hasAnswered = player.answers.has(questionIndex.toString());
+    } else {
+        hasAnswered = player.answers[questionIndex] !== undefined;
+    }
 
     if (player && !hasAnswered) {
         if(isCorrect) player.score += 10;
         
-        // Track total time taken for tie-breaking
         if (timeTaken) {
             player.totalTimeTaken = (player.totalTimeTaken || 0) + timeTaken;
         }
 
-        // Save the answer
+        // 2. Save the answer
         if (isDbConnected()) {
             player.answers.set(questionIndex.toString(), selectedOption);
+            await battle.save();
+            
+            // --- CONCURRENCY FIX: Re-fetch to check if ALL players answered ---
+            // This handles the race condition where multiple players click simultaneously
+            battle = await Battle.findOne({ roomId: req.params.roomId });
         } else {
             player.answers[questionIndex] = selectedOption;
         }
 
-        // AUTO-SKIP LOGIC: Check if ALL players answered this question
-        // Note: For Map in Mongoose, we need to convert to object to check keys or use .get
+        // 3. AUTO-SKIP LOGIC: Check if ALL players answered this question
         const allAnswered = battle.players.every(p => {
             if (isDbConnected()) return p.answers.has(questionIndex.toString());
             return p.answers[questionIndex] !== undefined;
         });
 
         if (allAnswered) {
-            // Logic: The frontend calculates currentQIndex based on elapsed time.
-            // elapsed = (now - start) / 1000.
-            // index = floor(elapsed / duration).
-            // To force jump to next index, we shift startTime back by the remaining time of current question.
-            // We want newElapsed = (questionIndex + 1) * duration + epsilon
-            // So newStart = now - newElapsed * 1000
+            // Shift startTime to make the current time logically the start of the NEXT question
+            // Logic: newElapsedTime should be (questionIndex + 1) * duration
+            // So: Date.now() - newStartTime = (questionIndex + 1) * duration
+            // => newStartTime = Date.now() - (questionIndex + 1) * duration
             
             const durationPerQ = battle.config.timePerQuestion;
             const targetElapsed = (questionIndex + 1) * durationPerQ;
-            // Add a small buffer (0.5s) to ensure index transition
-            battle.startTime = Date.now() - (targetElapsed * 1000) - 500;
+            
+            // Add 1000ms buffer so clients see the full time (e.g., 30s) instead of 28/29s due to latency
+            battle.startTime = Date.now() - (targetElapsed * 1000) + 1000;
+            
+            if (isDbConnected()) await battle.save();
         }
-
-        if (isDbConnected()) await battle.save();
     }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: 'Failed' }); }
