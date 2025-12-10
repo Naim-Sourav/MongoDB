@@ -130,8 +130,8 @@ const battleSchema = new mongoose.Schema({
   startTime: Number,
   questions: Array,
   config: {
-    subjects: [String], // Changed from single subject
-    chapters: [String], // Changed from single chapter
+    subjects: [String], 
+    chapters: [String], 
     mode: { type: String, enum: ['1v1', '2v2', 'FFA'], default: '1v1' },
     questionCount: { type: Number, default: 5 },
     timePerQuestion: { type: Number, default: 15 },
@@ -142,6 +142,7 @@ const battleSchema = new mongoose.Schema({
     name: String,
     avatar: String,
     score: { type: Number, default: 0 },
+    totalTimeTaken: { type: Number, default: 0 }, // For tie-breaking
     team: { type: String, enum: ['A', 'B', 'NONE'], default: 'NONE' },
     answers: { type: Map, of: Number, default: {} } 
   }]
@@ -619,7 +620,7 @@ app.post('/api/battles/create', async (req, res) => {
 
     const battleData = {
       roomId, hostId: userId, config, questions,
-      players: [{ uid: userId, name: userName, avatar, score: 0, team: config.mode === '2v2' ? 'A' : 'NONE', answers: {} }],
+      players: [{ uid: userId, name: userName, avatar, score: 0, totalTimeTaken: 0, team: config.mode === '2v2' ? 'A' : 'NONE', answers: {} }],
       status: 'WAITING'
     };
 
@@ -644,7 +645,7 @@ app.post('/api/battles/join', async (req, res) => {
 
     const exists = battle.players.find(p => p.uid === userId);
     if (!exists) {
-        battle.players.push({ uid: userId, name: userName, avatar, score: 0, team: 'NONE', answers: {} });
+        battle.players.push({ uid: userId, name: userName, avatar, score: 0, totalTimeTaken: 0, team: 'NONE', answers: {} });
         if (isDbConnected()) await battle.save();
     }
     res.json({ success: true });
@@ -692,7 +693,7 @@ app.get('/api/battles/:roomId', async (req, res) => {
 
 app.post('/api/battles/:roomId/answer', async (req, res) => {
   try {
-    const { userId, isCorrect, questionIndex, selectedOption } = req.body;
+    const { userId, isCorrect, questionIndex, selectedOption, timeTaken } = req.body;
     let battle;
     if (isDbConnected()) battle = await Battle.findOne({ roomId: req.params.roomId });
     else battle = memoryDb.battles.find(b => b.roomId === req.params.roomId);
@@ -708,6 +709,11 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
     if (player && !hasAnswered) {
         if(isCorrect) player.score += 10;
         
+        // Track total time taken for tie-breaking
+        if (timeTaken) {
+            player.totalTimeTaken = (player.totalTimeTaken || 0) + timeTaken;
+        }
+
         // Save the answer
         if (isDbConnected()) {
             player.answers.set(questionIndex.toString(), selectedOption);
