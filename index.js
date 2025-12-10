@@ -130,11 +130,12 @@ const battleSchema = new mongoose.Schema({
   startTime: Number,
   questions: Array,
   config: {
-    subject: String,
-    chapter: String,
+    subjects: [String], // Changed from single subject
+    chapters: [String], // Changed from single chapter
     mode: { type: String, enum: ['1v1', '2v2', 'FFA'], default: '1v1' },
     questionCount: { type: Number, default: 5 },
-    timePerQuestion: { type: Number, default: 15 }
+    timePerQuestion: { type: Number, default: 15 },
+    maxPlayers: { type: Number, default: 2 }
   },
   players: [{
     uid: String,
@@ -142,7 +143,6 @@ const battleSchema = new mongoose.Schema({
     avatar: String,
     score: { type: Number, default: 0 },
     team: { type: String, enum: ['A', 'B', 'NONE'], default: 'NONE' },
-    // Storing answers for comparison: { qIndex: 0, selectedOpt: 1 }
     answers: { type: Map, of: Number, default: {} } 
   }]
 });
@@ -598,13 +598,24 @@ app.post('/api/battles/create', async (req, res) => {
   try {
     const { userId, userName, avatar, config } = req.body;
     const roomId = Math.floor(100000 + Math.random() * 900000).toString(); 
+    
+    // Support multiple subjects and chapters query
+    const query = {
+        subject: { $in: config.subjects },
+        chapter: { $in: config.chapters }
+    };
+
     let questions = [];
     if (isDbConnected()) {
-        questions = await QuestionBank.aggregate([{ $match: { subject: config.subject, chapter: config.chapter } }, { $sample: { size: config.questionCount } }]);
+        questions = await QuestionBank.aggregate([{ $match: query }, { $sample: { size: config.questionCount } }]);
     } else {
-        questions = memoryDb.questions.filter(q => q.subject === config.subject && q.chapter === config.chapter).slice(0, config.questionCount);
+        questions = memoryDb.questions.filter(q => 
+            config.subjects.includes(q.subject) && 
+            config.chapters.includes(q.chapter)
+        ).slice(0, config.questionCount);
     }
-    if (questions.length === 0) return res.status(400).json({ error: 'Not enough questions in database.' });
+    
+    if (questions.length === 0) return res.status(400).json({ error: 'Not enough questions in database for selected topics.' });
 
     const battleData = {
       roomId, hostId: userId, config, questions,
@@ -615,7 +626,10 @@ app.post('/api/battles/create', async (req, res) => {
     if (isDbConnected()) { await new Battle(battleData).save(); } 
     else { memoryDb.battles.push(battleData); }
     res.json({ roomId });
-  } catch (e) { res.status(500).json({ error: 'Failed to create battle' }); }
+  } catch (e) { 
+      console.error(e);
+      res.status(500).json({ error: 'Failed to create battle' }); 
+  }
 });
 
 app.post('/api/battles/join', async (req, res) => {
