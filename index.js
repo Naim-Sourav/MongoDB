@@ -1,3 +1,4 @@
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -75,6 +76,19 @@ const isDbConnected = () => mongoose.connection.readyState === 1;
 
 // --- Schemas & Models (Mongoose) ---
 
+const questSchema = new mongoose.Schema({
+  id: String,
+  title: String,
+  description: String,
+  type: String, // EXAM_COMPLETE, HIGH_SCORE, WIN_BATTLE, STUDY_TIME, ASK_AI
+  target: Number,
+  progress: { type: Number, default: 0 },
+  reward: Number,
+  completed: { type: Boolean, default: false },
+  claimed: { type: Boolean, default: false },
+  icon: String
+}, { _id: false });
+
 const userSchema = new mongoose.Schema({
   uid: { type: String, required: true, unique: true },
   email: String,
@@ -95,7 +109,9 @@ const userSchema = new mongoose.Schema({
     totalSkipped: { type: Number, default: 0 },
     subjectStats: { type: Map, of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), default: {} },
     topicStats: { type: Map, of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), default: {} }
-  }
+  },
+  dailyQuests: [questSchema],
+  lastQuestReset: { type: Number, default: 0 }
 });
 const User = mongoose.model('User', userSchema);
 
@@ -142,7 +158,7 @@ const battleSchema = new mongoose.Schema({
     name: String,
     avatar: String,
     score: { type: Number, default: 0 },
-    totalTimeTaken: { type: Number, default: 0 }, // For tie-breaking
+    totalTimeTaken: { type: Number, default: 0 }, 
     team: { type: String, enum: ['A', 'B', 'NONE'], default: 'NONE' },
     answers: { type: Map, of: Number, default: {} } 
   }]
@@ -219,6 +235,21 @@ const ExamPack = mongoose.model('ExamPack', examPackSchema);
 app.get('/', (req, res) => {
   res.send(`🚀 Shikkha Shohayok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
 });
+
+// --- HELPER: QUEST GENERATOR ---
+const generateDailyQuests = () => {
+    const pool = [
+        { id: 'q1', title: 'Exam Warrior', description: 'যেকোনো ১টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 1, reward: 50, icon: 'FileCheck' },
+        { id: 'q2', title: 'Sharpshooter', description: 'কুইজে ৮০% মার্ক পাও', type: 'HIGH_SCORE', target: 1, reward: 100, icon: 'Target' },
+        { id: 'q3', title: 'Daily Learner', description: 'স্টাডি ট্র্যাকারে ২০ মিনিট পড়ো', type: 'STUDY_TIME', target: 20, reward: 80, icon: 'Clock' },
+        { id: 'q4', title: 'Battle Ready', description: '১টি কুইজ ব্যাটল খেলো', type: 'PLAY_BATTLE', target: 1, reward: 60, icon: 'Swords' },
+        { id: 'q5', title: 'Curious Mind', description: 'AI টিউটরকে ১টি প্রশ্ন করো', type: 'ASK_AI', target: 1, reward: 40, icon: 'Bot' },
+        { id: 'q6', title: 'Knowledge Keeper', description: '২টি গুরুত্বপূর্ণ প্রশ্ন সেভ করো', type: 'SAVE_QUESTION', target: 2, reward: 50, icon: 'Bookmark' },
+        { id: 'q7', title: 'Champion', description: '১টি কুইজ ব্যাটল জয়ে লাভ করো', type: 'WIN_BATTLE', target: 1, reward: 150, icon: 'Trophy' }
+    ];
+    // Shuffle and pick 3
+    return pool.sort(() => 0.5 - Math.random()).slice(0, 3).map(q => ({ ...q, progress: 0, completed: false, claimed: false }));
+};
 
 // --- ADMIN & STATS ---
 app.get('/api/admin/stats', async (req, res) => {
@@ -340,7 +371,7 @@ app.get('/api/exam-packs', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// --- USERS & SYNC ---
+// --- USERS & SYNC & QUESTS ---
 app.post('/api/users/sync', async (req, res) => {
   try {
     const { uid, email, displayName, photoURL, college, hscBatch, department, target } = req.body;
@@ -348,12 +379,36 @@ app.post('/api/users/sync', async (req, res) => {
     Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
 
     if (isDbConnected()) {
-      const user = await User.findOneAndUpdate({ uid }, updateData, { upsert: true, new: true });
+      let user = await User.findOne({ uid });
+      
+      // QUEST RESET LOGIC
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      let questsToSet = null;
+      let lastResetToSet = null;
+
+      if (!user) {
+          // New User
+          questsToSet = generateDailyQuests();
+          lastResetToSet = todayStart;
+      } else if (!user.lastQuestReset || user.lastQuestReset < todayStart) {
+          // Reset Needed
+          questsToSet = generateDailyQuests();
+          lastResetToSet = todayStart;
+      }
+
+      if (questsToSet) {
+          updateData.dailyQuests = questsToSet;
+          updateData.lastQuestReset = lastResetToSet;
+      }
+
+      user = await User.findOneAndUpdate({ uid }, updateData, { upsert: true, new: true });
       return res.json(user);
     } else {
+      // Memory DB fallback (Simplified quest logic)
       let user = memoryDb.users.find(u => u.uid === uid);
       if (!user) { 
-          user = { ...updateData, points: 0, stats: { totalCorrect: 0, totalWrong: 0, totalSkipped: 0, subjectStats: {}, topicStats: {} } }; 
+          user = { ...updateData, points: 0, stats: { totalCorrect: 0, totalWrong: 0, totalSkipped: 0, subjectStats: {}, topicStats: {} }, dailyQuests: generateDailyQuests() }; 
           memoryDb.users.push(user); 
       } else {
           Object.assign(user, updateData);
@@ -361,6 +416,74 @@ app.post('/api/users/sync', async (req, res) => {
       return res.json(user);
     }
   } catch (e) { res.status(500).json({error: 'Sync failed'}); }
+});
+
+// --- QUEST UPDATES ---
+app.post('/api/quests/update', async (req, res) => {
+    try {
+        const { userId, actionType, value } = req.body; // e.g. { actionType: 'EXAM_COMPLETE', value: 1 }
+        
+        if (isDbConnected()) {
+            const user = await User.findOne({ uid: userId });
+            if (!user) return res.status(404).json({ error: 'User not found' });
+
+            let updated = false;
+            user.dailyQuests = user.dailyQuests.map(q => {
+                if (q.type === actionType && !q.completed) {
+                    q.progress += value;
+                    if (q.progress >= q.target) {
+                        q.progress = q.target;
+                        q.completed = true;
+                    }
+                    updated = true;
+                }
+                return q;
+            });
+
+            if (updated) await user.save();
+            res.json({ success: true, quests: user.dailyQuests });
+        } else {
+            // Memory logic
+            const user = memoryDb.users.find(u => u.uid === userId);
+            if(user && user.dailyQuests) {
+                user.dailyQuests.forEach(q => {
+                    if (q.type === actionType && !q.completed) {
+                        q.progress += value;
+                        if (q.progress >= q.target) q.completed = true;
+                    }
+                });
+                res.json({ success: true, quests: user.dailyQuests });
+            }
+        }
+    } catch(e) { res.status(500).json({ error: 'Quest update failed' }); }
+});
+
+app.post('/api/quests/claim', async (req, res) => {
+    try {
+        const { userId, questId } = req.body;
+        if(isDbConnected()) {
+            const user = await User.findOne({ uid: userId });
+            const quest = user.dailyQuests.find(q => q.id === questId);
+            
+            if (quest && quest.completed && !quest.claimed) {
+                quest.claimed = true;
+                user.points += quest.reward;
+                await user.save();
+                res.json({ success: true, points: user.points, quests: user.dailyQuests });
+            } else {
+                res.status(400).json({ error: 'Cannot claim' });
+            }
+        } else {
+            // Memory logic
+            const user = memoryDb.users.find(u => u.uid === userId);
+            const quest = user?.dailyQuests?.find(q => q.id === questId);
+            if (quest && quest.completed && !quest.claimed) {
+                quest.claimed = true;
+                user.points += quest.reward;
+                res.json({ success: true, points: user.points, quests: user.dailyQuests });
+            }
+        }
+    } catch(e) { res.status(500).json({ error: 'Claim failed' }); }
 });
 
 app.get('/api/users/:userId/enrollments', async (req, res) => {
@@ -406,7 +529,8 @@ app.get('/api/users/:userId/stats', async (req, res) => {
             totalWrong: user.stats?.totalWrong || 0,
             subjectBreakdown,
             strongestTopics: topicBreakdown.slice(0, 5),
-            weakestTopics: topicBreakdown.slice().reverse().slice(0, 5)
+            weakestTopics: topicBreakdown.slice().reverse().slice(0, 5),
+            quests: user.dailyQuests || [] // Include quests in stats
         });
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
