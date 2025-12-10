@@ -142,7 +142,8 @@ const battleSchema = new mongoose.Schema({
     avatar: String,
     score: { type: Number, default: 0 },
     team: { type: String, enum: ['A', 'B', 'NONE'], default: 'NONE' },
-    answeredQuestions: { type: [Number], default: [] }
+    // Storing answers for comparison: { qIndex: 0, selectedOpt: 1 }
+    answers: { type: Map, of: Number, default: {} } 
   }]
 });
 const Battle = mongoose.model('Battle', battleSchema);
@@ -607,7 +608,7 @@ app.post('/api/battles/create', async (req, res) => {
 
     const battleData = {
       roomId, hostId: userId, config, questions,
-      players: [{ uid: userId, name: userName, avatar, score: 0, team: config.mode === '2v2' ? 'A' : 'NONE', answeredQuestions: [] }],
+      players: [{ uid: userId, name: userName, avatar, score: 0, team: config.mode === '2v2' ? 'A' : 'NONE', answers: {} }],
       status: 'WAITING'
     };
 
@@ -629,7 +630,7 @@ app.post('/api/battles/join', async (req, res) => {
 
     const exists = battle.players.find(p => p.uid === userId);
     if (!exists) {
-        battle.players.push({ uid: userId, name: userName, avatar, score: 0, team: 'NONE', answeredQuestions: [] });
+        battle.players.push({ uid: userId, name: userName, avatar, score: 0, team: 'NONE', answers: {} });
         if (isDbConnected()) await battle.save();
     }
     res.json({ success: true });
@@ -658,24 +659,48 @@ app.get('/api/battles/:roomId', async (req, res) => {
     let battle;
     if (isDbConnected()) battle = await Battle.findOne({ roomId: req.params.roomId });
     else battle = memoryDb.battles.find(b => b.roomId === req.params.roomId);
+    
     if (!battle) return res.status(404).json({ error: 'Battle not found' });
+
+    // Auto-finish logic if time expired
+    if (battle.status === 'ACTIVE' && battle.startTime) {
+        const totalDuration = (battle.config.timePerQuestion * battle.questions.length) + 10; // 10s buffer
+        const elapsed = (Date.now() - battle.startTime) / 1000;
+        if (elapsed > totalDuration) {
+            battle.status = 'FINISHED';
+            if (isDbConnected()) await battle.save();
+        }
+    }
+
     res.json(battle);
   } catch (e) { res.status(500).json({ error: 'Failed to fetch battle' }); }
 });
 
 app.post('/api/battles/:roomId/answer', async (req, res) => {
   try {
-    const { userId, isCorrect, questionIndex } = req.body;
+    const { userId, isCorrect, questionIndex, selectedOption } = req.body;
     let battle;
     if (isDbConnected()) battle = await Battle.findOne({ roomId: req.params.roomId });
     else battle = memoryDb.battles.find(b => b.roomId === req.params.roomId);
 
     if (!battle) return res.status(404).json({ error: 'Battle not found' });
     const player = battle.players.find(p => p.uid === userId);
-    if (player && !player.answeredQuestions.includes(questionIndex)) {
+    
+    // Convert Map to object for checking (in Mongoose Maps need .get)
+    let hasAnswered = false;
+    if (player.answers instanceof Map) hasAnswered = player.answers.has(questionIndex.toString());
+    else hasAnswered = player.answers && player.answers[questionIndex] !== undefined;
+
+    if (player && !hasAnswered) {
         if(isCorrect) player.score += 10;
-        player.answeredQuestions.push(questionIndex);
-        if(isDbConnected()) await battle.save();
+        
+        // Save the answer
+        if (isDbConnected()) {
+            player.answers.set(questionIndex.toString(), selectedOption);
+            await battle.save();
+        } else {
+            player.answers[questionIndex] = selectedOption;
+        }
     }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: 'Failed' }); }
