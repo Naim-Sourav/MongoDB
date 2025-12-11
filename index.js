@@ -16,7 +16,33 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://user:pass@cluster0
 
 // In-Memory Fallback Storage
 const memoryDb = {
-  users: [],
+  users: [
+    // Titan (100k+)
+    { uid: 'titan1', displayName: 'Ayman Sadiq', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=King', points: 150000, college: 'IBA', target: 'Business', role: 'student' },
+    { uid: 'titan2', displayName: 'Dr. Strange', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Wizard', points: 110000, college: 'Kamar-Taj', target: 'Medical', role: 'student' },
+    
+    // Grandmaster (50k+)
+    { uid: 'gm1', displayName: 'Tahmid Khan', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Felix', points: 85000, college: 'NDC', target: 'Engineering', role: 'student' },
+    { uid: 'gm2', displayName: 'Sadia Islam', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sadia', points: 62000, college: 'Viqarunnisa', target: 'Medical', role: 'student' },
+    
+    // Master (25k+)
+    { uid: 'm1', displayName: 'Rafiqul Islam', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Jack', points: 45000, college: 'Dhaka College', target: 'Varsity', role: 'student' },
+    { uid: 'm2', displayName: 'Karim Benzema', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Karim', points: 32000, college: 'Rajuk', target: 'Engineering', role: 'student' },
+    
+    // Elite (10k+)
+    { uid: 'e1', displayName: 'Sarah Ahmed', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Aneka', points: 18000, college: 'Holy Cross', target: 'Medical', role: 'student' },
+    { uid: 'e2', displayName: 'John Doe', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=John', points: 12500, college: 'Residential', target: 'Varsity', role: 'student' },
+    
+    // Scholar (4k+)
+    { uid: 's1', displayName: 'Abir Hasan', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Abir', points: 7500, college: 'City College', target: 'Engineering', role: 'student' },
+    { uid: 's2', displayName: 'Mitu Roy', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Mitu', points: 5200, college: 'Eden College', target: 'Medical', role: 'student' },
+    
+    // Apprentice (1k+)
+    { uid: 'a2', displayName: 'Newbie User', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=New', points: 1200, college: 'Unknown', target: 'Medical', role: 'student' },
+    
+    // Novice (<1k)
+    { uid: 'n1', displayName: 'Guest User', photoURL: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Guest', points: 450, college: 'Unknown', target: 'Varsity', role: 'student' }
+  ],
   payments: [],
   notifications: [
     { _id: '1', title: 'System', message: 'Running in fallback mode (Database disconnected)', type: 'WARNING', date: Date.now() }
