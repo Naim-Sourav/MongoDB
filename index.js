@@ -1,3 +1,4 @@
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -257,19 +258,19 @@ app.get('/', (req, res) => {
 
 // --- HELPER: QUEST GENERATOR ---
 const DEFAULT_QUESTS = [
-    // Daily
-    { title: 'Exam Warrior', description: 'যেকোনো ১টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 1, reward: 50, icon: 'FileCheck', link: '/quiz', category: 'DAILY' },
-    { title: 'Battle Ready', description: '১টি কুইজ ব্যাটল খেলো', type: 'PLAY_BATTLE', target: 1, reward: 60, icon: 'Swords', link: '/battle', category: 'DAILY' },
-    { title: 'Knowledge Keeper', description: '২টি প্রশ্ন সেভ করো', type: 'SAVE_QUESTION', target: 2, reward: 50, icon: 'Bookmark', link: '/quiz', category: 'DAILY' },
-    { title: 'Daily Learner', description: '২০ মিনিট পড়ো', type: 'STUDY_TIME', target: 20, reward: 80, icon: 'Clock', link: '/tracker', category: 'DAILY' },
-    { title: 'Curious Mind', description: 'AI টিউটরকে ১টি প্রশ্ন করো', type: 'ASK_AI', target: 1, reward: 40, icon: 'Bot', link: 'SYNAPSE', category: 'DAILY' },
-    { title: 'Sharpshooter', description: 'কুইজে ৮০% মার্ক পাও', type: 'HIGH_SCORE', target: 1, reward: 100, icon: 'Target', link: '/quiz', category: 'DAILY' },
-    { title: 'Deep Diver', description: 'প্রশ্ন ব্যাংক থেকে ১০টি প্রশ্ন প্র্যাকটিস করো', type: 'EXAM_COMPLETE', target: 1, reward: 60, icon: 'Database', link: '/qbank', category: 'DAILY' },
-    // Weekly
-    { title: 'Weekly Exam Master', description: 'এই সপ্তাহে ৫টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 5, reward: 300, icon: 'Trophy', link: '/quiz', category: 'WEEKLY' },
-    { title: 'Syllabus Crusher', description: 'যেকোনো অধ্যায়ের উপর পরীক্ষা দাও', type: 'EXAM_COMPLETE', target: 1, reward: 150, icon: 'BookOpen', link: '/quiz', category: 'WEEKLY' },
-    { title: 'Consistency King', description: 'টানা ৩ দিন অ্যাপ ব্যবহার করো', type: 'LOGIN', target: 3, reward: 200, icon: 'Calendar', link: '#', category: 'WEEKLY' },
-    { title: 'Battle Royale', description: '৫টি ব্যাটল জিতো', type: 'WIN_BATTLE', target: 5, reward: 500, icon: 'Crown', link: '/battle', category: 'WEEKLY' }
+    // Daily - REBALANCED FOR HARDER ECONOMY
+    { title: 'Exam Warrior', description: 'যেকোনো ১টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 1, reward: 25, icon: 'FileCheck', link: '/quiz', category: 'DAILY' },
+    { title: 'Battle Ready', description: '১টি কুইজ ব্যাটল খেলো', type: 'PLAY_BATTLE', target: 1, reward: 30, icon: 'Swords', link: '/battle', category: 'DAILY' },
+    { title: 'Knowledge Keeper', description: '২টি প্রশ্ন সেভ করো', type: 'SAVE_QUESTION', target: 2, reward: 20, icon: 'Bookmark', link: '/quiz', category: 'DAILY' },
+    { title: 'Daily Learner', description: '২০ মিনিট পড়ো', type: 'STUDY_TIME', target: 20, reward: 40, icon: 'Clock', link: '/tracker', category: 'DAILY' },
+    { title: 'Curious Mind', description: 'AI টিউটরকে ১টি প্রশ্ন করো', type: 'ASK_AI', target: 1, reward: 15, icon: 'Bot', link: 'SYNAPSE', category: 'DAILY' },
+    { title: 'Sharpshooter', description: 'কুইজে ৮০% মার্ক পাও', type: 'HIGH_SCORE', target: 1, reward: 50, icon: 'Target', link: '/quiz', category: 'DAILY' },
+    { title: 'Deep Diver', description: 'প্রশ্ন ব্যাংক থেকে ১০টি প্রশ্ন প্র্যাকটিস করো', type: 'EXAM_COMPLETE', target: 1, reward: 30, icon: 'Database', link: '/qbank', category: 'DAILY' },
+    // Weekly - REBALANCED
+    { title: 'Weekly Exam Master', description: 'এই সপ্তাহে ৫টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 5, reward: 150, icon: 'Trophy', link: '/quiz', category: 'WEEKLY' },
+    { title: 'Syllabus Crusher', description: 'যেকোনো অধ্যায়ের উপর পরীক্ষা দাও', type: 'EXAM_COMPLETE', target: 1, reward: 100, icon: 'BookOpen', link: '/quiz', category: 'WEEKLY' },
+    { title: 'Consistency King', description: 'টানা ৩ দিন অ্যাপ ব্যবহার করো', type: 'LOGIN', target: 3, reward: 150, icon: 'Calendar', link: '#', category: 'WEEKLY' },
+    { title: 'Battle Royale', description: '৫টি ব্যাটল জিতো', type: 'WIN_BATTLE', target: 5, reward: 250, icon: 'Crown', link: '/battle', category: 'WEEKLY' }
 ];
 
 const getQuestsFromPool = async (category, count) => {
@@ -681,7 +682,10 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
             const user = await User.findOne({ uid: userId });
             if (user) {
                 if (!user.stats) user.stats = { totalCorrect:0, totalWrong:0, totalSkipped:0, subjectStats: {}, topicStats: {} };
-                user.points = (user.points || 0) + (resultData.correct * 10) + 20; 
+                
+                // Reduced points for exam completion to prevent inflation
+                user.points = (user.points || 0) + (resultData.correct * 5) + 10; 
+                
                 user.totalExams = (user.totalExams || 0) + 1;
                 user.stats.totalCorrect = (user.stats.totalCorrect || 0) + resultData.correct;
                 user.stats.totalWrong = (user.stats.totalWrong || 0) + resultData.wrong;
@@ -964,7 +968,7 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
     }
 
     if (player && !hasAnswered) {
-        if(isCorrect) player.score += 10;
+        if(isCorrect) player.score += 50; // Increased battle reward to 50
         
         if (timeTaken) {
             player.totalTimeTaken = (player.totalTimeTaken || 0) + timeTaken;
