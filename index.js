@@ -1,3 +1,4 @@
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -79,13 +80,14 @@ const questSchema = new mongoose.Schema({
   id: String,
   title: String,
   description: String,
-  type: String, // EXAM_COMPLETE, HIGH_SCORE, WIN_BATTLE, STUDY_TIME, ASK_AI
+  type: String, // EXAM_COMPLETE, HIGH_SCORE, WIN_BATTLE, STUDY_TIME, ASK_AI, SAVE_QUESTION
   target: Number,
   progress: { type: Number, default: 0 },
   reward: Number,
   completed: { type: Boolean, default: false },
   claimed: { type: Boolean, default: false },
-  icon: String
+  icon: String,
+  link: String // New field for frontend navigation
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
@@ -237,17 +239,32 @@ app.get('/', (req, res) => {
 
 // --- HELPER: QUEST GENERATOR ---
 const generateDailyQuests = () => {
+    // 20 Challenge Ideas Pool
     const pool = [
-        { id: 'q1', title: 'Exam Warrior', description: 'যেকোনো ১টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 1, reward: 50, icon: 'FileCheck' },
-        { id: 'q2', title: 'Sharpshooter', description: 'কুইজে ৮০% মার্ক পাও', type: 'HIGH_SCORE', target: 1, reward: 100, icon: 'Target' },
-        { id: 'q3', title: 'Daily Learner', description: 'স্টাডি ট্র্যাকারে ২০ মিনিট পড়ো', type: 'STUDY_TIME', target: 20, reward: 80, icon: 'Clock' },
-        { id: 'q4', title: 'Battle Ready', description: '১টি কুইজ ব্যাটল খেলো', type: 'PLAY_BATTLE', target: 1, reward: 60, icon: 'Swords' },
-        { id: 'q5', title: 'Curious Mind', description: 'AI টিউটরকে ১টি প্রশ্ন করো', type: 'ASK_AI', target: 1, reward: 40, icon: 'Bot' },
-        { id: 'q6', title: 'Knowledge Keeper', description: '২টি গুরুত্বপূর্ণ প্রশ্ন সেভ করো', type: 'SAVE_QUESTION', target: 2, reward: 50, icon: 'Bookmark' },
-        { id: 'q7', title: 'Champion', description: '১টি কুইজ ব্যাটল জয়ে লাভ করো', type: 'WIN_BATTLE', target: 1, reward: 150, icon: 'Trophy' }
+        { id: 'q1', title: 'Exam Warrior', description: 'যেকোনো ১টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 1, reward: 50, icon: 'FileCheck', link: '/quiz' },
+        { id: 'q2', title: 'Battle Ready', description: '১টি কুইজ ব্যাটল খেলো', type: 'PLAY_BATTLE', target: 1, reward: 60, icon: 'Swords', link: '/battle' },
+        { id: 'q3', title: 'Champion', description: '১টি কুইজ ব্যাটল জয়ে লাভ করো', type: 'WIN_BATTLE', target: 1, reward: 150, icon: 'Trophy', link: '/battle' },
+        { id: 'q4', title: 'Knowledge Keeper', description: '২টি গুরুত্বপূর্ণ প্রশ্ন সেভ করো', type: 'SAVE_QUESTION', target: 2, reward: 50, icon: 'Bookmark', link: '/quiz' },
+        { id: 'q5', title: 'Curious Mind', description: 'AI টিউটরকে ১টি প্রশ্ন করো', type: 'ASK_AI', target: 1, reward: 40, icon: 'Bot', link: 'SYNAPSE' },
+        { id: 'q6', title: 'Daily Learner', description: 'স্টাডি ট্র্যাকারে ২০ মিনিট পড়ো', type: 'STUDY_TIME', target: 20, reward: 80, icon: 'Clock', link: '/tracker' },
+        { id: 'q7', title: 'Sharpshooter', description: 'কুইজে ৮০% মার্ক পাও', type: 'HIGH_SCORE', target: 1, reward: 100, icon: 'Target', link: '/quiz' },
+        { id: 'q8', title: 'Physics Master', description: 'পদার্থবিজ্ঞানের ১টি কুইজ দাও', type: 'EXAM_COMPLETE', target: 1, reward: 70, icon: 'Atom', link: '/quiz' },
+        { id: 'q9', title: 'Chemistry Lab', description: 'রসায়নের ১টি কুইজ দাও', type: 'EXAM_COMPLETE', target: 1, reward: 70, icon: 'Beaker', link: '/quiz' },
+        { id: 'q10', title: 'Math Genius', description: 'উচ্চতর গণিতের ১টি কুইজ দাও', type: 'EXAM_COMPLETE', target: 1, reward: 70, icon: 'Calculator', link: '/quiz' },
+        { id: 'q11', title: 'Bio Hacker', description: 'জীববিজ্ঞানের ১টি কুইজ দাও', type: 'EXAM_COMPLETE', target: 1, reward: 70, icon: 'Dna', link: '/quiz' },
+        { id: 'q12', title: 'Marathon Runner', description: 'মোট ৩টি কুইজ শেষ করো', type: 'EXAM_COMPLETE', target: 3, reward: 120, icon: 'Activity', link: '/quiz' },
+        { id: 'q13', title: 'Point Collector', description: 'আজ ২০০ পয়েন্ট অর্জন করো (যেকোনো উপায়ে)', type: 'EARN_POINTS', target: 200, reward: 50, icon: 'Zap', link: '/dashboard' },
+        { id: 'q14', title: 'Deep Diver', description: 'প্রশ্ন ব্যাংক থেকে ১০টি প্রশ্ন প্র্যাকটিস করো', type: 'EXAM_COMPLETE', target: 1, reward: 60, icon: 'Database', link: '/qbank' },
+        { id: 'q15', title: 'Focus Mode', description: 'টানা ৪৫ মিনিট পড়াশোনা করো', type: 'STUDY_TIME', target: 45, reward: 150, icon: 'Clock', link: '/tracker' },
+        { id: 'q16', title: 'Quick Fire', description: '৫ মিনিটের মধ্যে একটি কুইজ শেষ করো', type: 'EXAM_COMPLETE', target: 1, reward: 90, icon: 'Zap', link: '/quiz' },
+        { id: 'q17', title: 'Reviewer', description: 'তোমার মিসটেক লিস্ট চেক করো', type: 'VIEW_MISTAKES', target: 1, reward: 30, icon: 'AlertCircle', link: '/profile' },
+        { id: 'q18', title: 'Social Star', description: 'বন্ধুদের সাথে অ্যাপটি শেয়ার করো', type: 'SHARE_APP', target: 1, reward: 50, icon: 'Share2', link: 'SHARE' },
+        { id: 'q19', title: 'Weekend Warrior', description: 'একটি পূর্ণাঙ্গ মডেল টেস্ট দাও', type: 'EXAM_COMPLETE', target: 1, reward: 200, icon: 'FileCheck', link: '/exams' },
+        { id: 'q20', title: 'Consistent', description: 'অ্যাপে লগইন করো', type: 'LOGIN', target: 1, reward: 20, icon: 'UserCheck', link: '#' }
     ];
-    // Shuffle and pick 3
-    return pool.sort(() => 0.5 - Math.random()).slice(0, 3).map(q => ({ ...q, progress: 0, completed: false, claimed: false }));
+    
+    // Pick 5 random quests
+    return pool.sort(() => 0.5 - Math.random()).slice(0, 5).map(q => ({ ...q, progress: 0, completed: false, claimed: false }));
 };
 
 // --- ADMIN & STATS ---
