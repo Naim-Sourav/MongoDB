@@ -591,7 +591,7 @@ app.post('/api/admin/notifications', async (req, res) => {
 app.get('/api/leaderboard', async (req, res) => {
     try {
         if(isDbConnected()) {
-            const users = await User.find().sort({ points: -1 }).limit(50).select('uid displayName photoURL points');
+            const users = await User.find().sort({ points: -1 }).limit(50).select('uid displayName photoURL points college hscBatch target department');
             res.json(users);
         } else {
             res.json(memoryDb.users.sort((a,b) => b.points - a.points).slice(0, 50));
