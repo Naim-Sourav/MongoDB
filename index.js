@@ -1,4 +1,3 @@
-
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -280,7 +279,12 @@ app.get('/api/admin/payments', async (req, res) => {
     try {
         if(isDbConnected()) {
             const payments = await Payment.find().sort({ timestamp: -1 });
-            res.json(payments);
+            // Fix: Map _id to id for frontend compatibility
+            const formattedPayments = payments.map(p => {
+                const obj = p.toObject();
+                return { ...obj, id: obj._id.toString() };
+            });
+            res.json(formattedPayments);
         } else {
             res.json(memoryDb.payments);
         }
@@ -328,7 +332,11 @@ app.get('/api/notifications', async (req, res) => {
     try {
         if(isDbConnected()) {
             const notifs = await Notification.find().sort({ date: -1 });
-            res.json(notifs);
+            const formattedNotifs = notifs.map(n => {
+                const obj = n.toObject();
+                return { ...obj, id: obj._id.toString() };
+            });
+            res.json(formattedNotifs);
         } else {
             res.json(memoryDb.notifications);
         }
@@ -864,11 +872,6 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
         });
 
         if (allAnswered) {
-            // Shift startTime to make the current time logically the start of the NEXT question
-            // Logic: newElapsedTime should be (questionIndex + 1) * duration
-            // So: Date.now() - newStartTime = (questionIndex + 1) * duration
-            // => newStartTime = Date.now() - (questionIndex + 1) * duration
-            
             const durationPerQ = battle.config.timePerQuestion;
             const targetElapsed = (questionIndex + 1) * durationPerQ;
             
