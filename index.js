@@ -647,7 +647,15 @@ app.get('/api/users/:userId/stats', async (req, res) => {
         })).sort((a,b) => b.accuracy - a.accuracy);
 
         res.json({
-            user: { college: user.college, hscBatch: user.hscBatch, department: user.department, target: user.target, points: user.points },
+            user: { 
+                displayName: user.displayName, // Return displayName
+                photoURL: user.photoURL,       // Return photoURL
+                college: user.college, 
+                hscBatch: user.hscBatch, 
+                department: user.department, 
+                target: user.target, 
+                points: user.points 
+            },
             points: user.points,
             totalExams: user.totalExams,
             totalCorrect: user.stats?.totalCorrect || 0,
