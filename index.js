@@ -342,15 +342,70 @@ app.post('/api/users/sync', async (req, res) => {
 app.get('/api/users/:userId/stats', async (req, res) => {
     try {
         const { userId } = req.params;
-        let user;
+        let user, results;
+        
         if(isDbConnected()) {
             user = await User.findOne({ uid: userId });
+            results = await ExamResult.find({ userId: userId });
         } else {
             user = memoryDb.users.find(u => u.uid === userId);
+            results = memoryDb.examResults.filter(r => r.userId === userId);
         }
         
-        if (user) res.json(user);
-        else res.json({ points: 0, totalExams: 0 });
+        if (!user) return res.json({ points: 0, totalExams: 0 });
+
+        // Calculate Aggregates
+        let totalCorrect = 0;
+        let totalWrong = 0;
+        const subjectStats = {}; 
+        const topicStats = {}; 
+
+        results.forEach(r => {
+            totalCorrect += (r.correct || 0);
+            totalWrong += (r.wrong || 0);
+            
+            // Subject Aggregation
+            const subj = r.subject || 'General';
+            if(!subjectStats[subj]) subjectStats[subj] = { correct: 0, total: 0 };
+            subjectStats[subj].correct += (r.correct || 0);
+            subjectStats[subj].total += (r.totalQuestions || 0);
+
+            // Topic Aggregation
+            if(r.topicStats && Array.isArray(r.topicStats)) {
+                r.topicStats.forEach(t => {
+                    const topic = t.topic || 'Unknown';
+                    if(!topicStats[topic]) topicStats[topic] = { correct: 0, total: 0 };
+                    topicStats[topic].correct += t.correct;
+                    topicStats[topic].total += t.total;
+                });
+            }
+        });
+
+        // Format for Frontend
+        const subjectBreakdown = Object.keys(subjectStats).map(s => ({
+            subject: s,
+            accuracy: subjectStats[s].total > 0 ? (subjectStats[s].correct / subjectStats[s].total) * 100 : 0
+        }));
+
+        const topicsArr = Object.keys(topicStats).map(t => ({
+            topic: t,
+            accuracy: topicStats[t].total > 0 ? (topicStats[t].correct / topicStats[t].total) * 100 : 0
+        })).sort((a,b) => b.accuracy - a.accuracy);
+
+        const response = {
+            user: user,
+            points: user.points || 0,
+            totalExams: results.length,
+            totalCorrect,
+            totalWrong,
+            subjectBreakdown,
+            strongestTopics: topicsArr.filter(t => t.accuracy >= 70).slice(0, 3),
+            weakestTopics: topicsArr.filter(t => t.accuracy < 70).slice(0, 3).reverse(),
+            quests: user.dailyQuests || [],
+            weeklyQuests: user.weeklyQuests || []
+        };
+        
+        res.json(response);
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
@@ -362,7 +417,7 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
         
         if(isDbConnected()) {
             await new ExamResult({ userId, ...resultData }).save();
-            // Update User Stats logic would go here (points increment etc)
+            // Update User Stats
             await User.updateOne({ uid: userId }, { 
                 $inc: { 
                     points: resultData.score, 
@@ -371,6 +426,13 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                     'stats.totalWrong': resultData.wrong
                 } 
             });
+        } else {
+            memoryDb.examResults.push({ userId, ...resultData, createdAt: Date.now() });
+            const user = memoryDb.users.find(u => u.uid === userId);
+            if (user) {
+                user.points = (user.points || 0) + resultData.score;
+                user.totalExams = (user.totalExams || 0) + 1;
+            }
         }
         res.json({ success: true });
     } catch(e) { res.status(500).json({error: e.message}); }
