@@ -152,17 +152,22 @@ const Payment = mongoose.model('Payment', paymentSchema);
 const notificationSchema = new mongoose.Schema({
   title: String,
   message: String,
-  type: { type: String, enum: ['INFO', 'WARNING', 'SUCCESS'] },
+  type: { type: String, enum: ['INFO', 'WARNING', 'SUCCESS', 'BATTLE_CHALLENGE', 'BATTLE_RESULT'] },
   date: { type: Number, default: Date.now },
-  target: { type: String, default: 'ALL' }
+  target: { type: String, default: 'ALL' }, // 'ALL' or specific userId
+  metadata: Object,
+  actionLink: String
 });
 const Notification = mongoose.model('Notification', notificationSchema);
 
 const battleSchema = new mongoose.Schema({
   roomId: { type: String, required: true, unique: true },
   hostId: String,
+  opponentId: String, // For 1v1 Async
   createdAt: { type: Number, default: Date.now },
-  status: { type: String, enum: ['WAITING', 'ACTIVE', 'FINISHED'], default: 'WAITING' },
+  type: { type: String, enum: ['LIVE', 'ASYNC'], default: 'LIVE' },
+  status: { type: String, enum: ['WAITING', 'ACTIVE', 'FINISHED', 'CHALLENGE_PENDING'], default: 'WAITING' },
+  turn: String, // userId whose turn it is in Async
   startTime: Number,
   questions: Array,
   config: {
@@ -180,7 +185,8 @@ const battleSchema = new mongoose.Schema({
     score: { type: Number, default: 0 },
     totalTimeTaken: { type: Number, default: 0 }, 
     team: { type: String, enum: ['A', 'B', 'NONE'], default: 'NONE' },
-    answers: { type: Map, of: Number, default: {} } 
+    answers: { type: Map, of: Number, default: {} },
+    completed: { type: Boolean, default: false }
   }]
 });
 const Battle = mongoose.model('Battle', battleSchema);
@@ -562,16 +568,23 @@ app.delete('/api/admin/payments/:id', async (req, res) => {
 // --- NOTIFICATIONS ---
 app.get('/api/notifications', async (req, res) => {
     try {
+        // Support target filtering in memory/mongo
+        const userId = req.query.userId;
+        let notifs = [];
+        
         if(isDbConnected()) {
-            const notifs = await Notification.find().sort({ date: -1 });
-            const formattedNotifs = notifs.map(n => {
+            const query = { $or: [{ target: 'ALL' }] };
+            if(userId) query.$or.push({ target: userId });
+            
+            const fetched = await Notification.find(query).sort({ date: -1 });
+            notifs = fetched.map(n => {
                 const obj = n.toObject();
                 return { ...obj, id: obj._id.toString() };
             });
-            res.json(formattedNotifs);
         } else {
-            res.json(memoryDb.notifications);
+            notifs = memoryDb.notifications.filter(n => n.target === 'ALL' || n.target === userId);
         }
+        res.json(notifs);
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
@@ -897,6 +910,112 @@ app.post('/api/battles/create', async (req, res) => {
   }
 });
 
+// --- NEW ASYNC BATTLE CHALLENGE ENDPOINTS ---
+
+app.post('/api/battles/challenge', async (req, res) => {
+    try {
+        const { challengerId, opponentId, challengerName, challengerAvatar, config } = req.body;
+        const roomId = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // 1. Generate Questions
+        let questions = [];
+        const query = { subject: { $in: config.subjects }, chapter: { $in: config.chapters } };
+        
+        if (isDbConnected()) {
+            questions = await QuestionBank.aggregate([{ $match: query }, { $sample: { size: config.questionCount } }]);
+        } else {
+            questions = memoryDb.questions.filter(q => config.subjects.includes(q.subject) && config.chapters.includes(q.chapter)).slice(0, config.questionCount);
+        }
+
+        if (questions.length === 0) return res.status(400).json({ error: 'No questions available' });
+
+        // 2. Create Battle Record
+        const battleData = {
+            roomId, 
+            hostId: challengerId, 
+            opponentId,
+            type: 'ASYNC',
+            status: 'CHALLENGE_PENDING',
+            config, 
+            questions,
+            players: [{ uid: challengerId, name: challengerName, avatar: challengerAvatar, score: 0, totalTimeTaken: 0, answers: {}, completed: false }],
+            createdAt: Date.now()
+        };
+
+        if (isDbConnected()) { await new Battle(battleData).save(); } 
+        else { memoryDb.battles.push(battleData); }
+
+        // 3. Create Notification for Opponent
+        const notifData = {
+            title: "Battle Challenge!",
+            message: `${challengerName} has challenged you to a quiz battle on ${config.subjects.join(', ')}!`,
+            type: 'BATTLE_CHALLENGE',
+            date: Date.now(),
+            target: opponentId,
+            metadata: { roomId, challengerName, challengerAvatar },
+            actionLink: '/battle'
+        };
+
+        if (isDbConnected()) { await new Notification(notifData).save(); }
+        else { memoryDb.notifications.unshift({ ...notifData, _id: Date.now().toString() }); }
+
+        res.json({ roomId });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/battles/pending/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const query = { 
+            type: 'ASYNC',
+            $or: [
+                { hostId: userId }, 
+                { opponentId: userId }
+            ],
+            status: { $ne: 'FINISHED' }
+        };
+
+        if (isDbConnected()) {
+            const battles = await Battle.find(query).sort({ createdAt: -1 });
+            res.json(battles);
+        } else {
+            const battles = memoryDb.battles.filter(b => 
+                b.type === 'ASYNC' && 
+                b.status !== 'FINISHED' && 
+                (b.hostId === userId || b.opponentId === userId)
+            );
+            res.json(battles);
+        }
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/battles/accept', async (req, res) => {
+    try {
+        const { roomId, userId, userName, avatar } = req.body;
+        let battle;
+        if (isDbConnected()) battle = await Battle.findOne({ roomId });
+        else battle = memoryDb.battles.find(b => b.roomId === roomId);
+
+        if (!battle) return res.status(404).json({ error: 'Room not found' });
+        if (battle.opponentId !== userId) return res.status(403).json({ error: 'Not authorized' });
+
+        // Add player if not exists
+        const exists = battle.players.find(p => p.uid === userId);
+        if (!exists) {
+            battle.players.push({ uid: userId, name: userName, avatar, score: 0, totalTimeTaken: 0, team: 'NONE', answers: {}, completed: false });
+        }
+
+        battle.status = 'ACTIVE';
+        battle.turn = userId; // It's the acceptor's turn immediately
+        
+        if (isDbConnected()) await battle.save();
+
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- EXISTING BATTLE ROUTES (Modified for Async logic) ---
+
 app.post('/api/battles/join', async (req, res) => {
   try {
     const { roomId, userId, userName, avatar } = req.body;
@@ -941,9 +1060,9 @@ app.get('/api/battles/:roomId', async (req, res) => {
     
     if (!battle) return res.status(404).json({ error: 'Battle not found' });
 
-    // Auto-finish logic if time expired
-    if (battle.status === 'ACTIVE' && battle.startTime) {
-        const totalDuration = (battle.config.timePerQuestion * battle.questions.length) + 10; // 10s buffer
+    // Auto-finish logic if time expired (ONLY FOR LIVE BATTLES)
+    if (battle.type === 'LIVE' && battle.status === 'ACTIVE' && battle.startTime) {
+        const totalDuration = (battle.config.timePerQuestion * battle.questions.length) + 10; 
         const elapsed = (Date.now() - battle.startTime) / 1000;
         if (elapsed > totalDuration) {
             battle.status = 'FINISHED';
@@ -960,54 +1079,76 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
     const { userId, isCorrect, questionIndex, selectedOption, timeTaken } = req.body;
     let battle;
     
-    // 1. Fetch current state
     if (isDbConnected()) battle = await Battle.findOne({ roomId: req.params.roomId });
     else battle = memoryDb.battles.find(b => b.roomId === req.params.roomId);
 
     if (!battle) return res.status(404).json({ error: 'Battle not found' });
     const player = battle.players.find(p => p.uid === userId);
     
-    // Check if already answered using Map (for memory db) or checking key (for Mongoose map)
+    // Check if already answered
     let hasAnswered = false;
-    if (isDbConnected()) {
-        hasAnswered = player.answers.has(questionIndex.toString());
-    } else {
-        hasAnswered = player.answers[questionIndex] !== undefined;
-    }
+    if (isDbConnected()) hasAnswered = player.answers.has(questionIndex.toString());
+    else hasAnswered = player.answers[questionIndex] !== undefined;
 
     if (player && !hasAnswered) {
-        if(isCorrect) player.score += 50; // Increased battle reward to 50
-        
-        if (timeTaken) {
-            player.totalTimeTaken = (player.totalTimeTaken || 0) + timeTaken;
-        }
+        if(isCorrect) player.score += 50;
+        if (timeTaken) player.totalTimeTaken = (player.totalTimeTaken || 0) + timeTaken;
 
-        // 2. Save the answer
+        // Save answer
         if (isDbConnected()) {
             player.answers.set(questionIndex.toString(), selectedOption);
+            // Check if last question for this player
+            if (questionIndex === battle.questions.length - 1) {
+                player.completed = true;
+            }
             await battle.save();
-            
-            // --- CONCURRENCY FIX: Re-fetch to check if ALL players answered ---
-            // This handles the race condition where multiple players click simultaneously
-            battle = await Battle.findOne({ roomId: req.params.roomId });
+            battle = await Battle.findOne({ roomId: req.params.roomId }); // Reload
         } else {
             player.answers[questionIndex] = selectedOption;
+            if (questionIndex === battle.questions.length - 1) player.completed = true;
         }
 
-        // 3. AUTO-SKIP LOGIC: Check if ALL players answered this question
-        const allAnswered = battle.players.every(p => {
-            if (isDbConnected()) return p.answers.has(questionIndex.toString());
-            return p.answers[questionIndex] !== undefined;
-        });
+        // Logic split based on type
+        if (battle.type === 'LIVE') {
+            // Auto-skip logic for LIVE
+            const allAnswered = battle.players.every(p => {
+                if (isDbConnected()) return p.answers.has(questionIndex.toString());
+                return p.answers[questionIndex] !== undefined;
+            });
 
-        if (allAnswered) {
-            const durationPerQ = battle.config.timePerQuestion;
-            const targetElapsed = (questionIndex + 1) * durationPerQ;
+            if (allAnswered) {
+                const durationPerQ = battle.config.timePerQuestion;
+                const targetElapsed = (questionIndex + 1) * durationPerQ;
+                battle.startTime = Date.now() - (targetElapsed * 1000) + 1000;
+                if (isDbConnected()) await battle.save();
+            }
+        } else if (battle.type === 'ASYNC') {
+            // Check if both players completed for ASYNC
+            const allCompleted = battle.players.length === 2 && battle.players.every(p => p.completed);
             
-            // Add 1000ms buffer so clients see the full time (e.g., 30s) instead of 28/29s due to latency
-            battle.startTime = Date.now() - (targetElapsed * 1000) + 1000;
-            
-            if (isDbConnected()) await battle.save();
+            // If current player finished, notify opponent if opponent is waiting
+            if (player.completed && !allCompleted) {
+                 const opponent = battle.players.find(p => p.uid !== userId);
+                 if (opponent) {
+                     // If opponent hasn't played yet, notify them it's their turn
+                     // Or just notify that user played.
+                     const notifData = {
+                        title: "Battle Update",
+                        message: `${player.name} has finished their turn!`,
+                        type: 'BATTLE_RESULT',
+                        date: Date.now(),
+                        target: opponent.uid,
+                        actionLink: '/battle'
+                    };
+                    if (isDbConnected()) { await new Notification(notifData).save(); }
+                    else { memoryDb.notifications.unshift({ ...notifData, _id: Date.now().toString() }); }
+                 }
+            }
+
+            if (allCompleted) {
+                battle.status = 'FINISHED';
+                if (isDbConnected()) await battle.save();
+            }
         }
     }
     res.json({ success: true });
