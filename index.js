@@ -12,65 +12,41 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
 // --- MongoDB Connection Setup ---
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://user:pass@cluster0.mongodb.net/shikkha-shohayok?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI;
 
-// In-Memory Fallback Storage
-const memoryDb = {
-  users: [],
-  payments: [],
-  notifications: [
-    { _id: '1', title: 'System', message: 'Running in fallback mode (Database disconnected)', type: 'WARNING', date: Date.now() }
-  ],
-  battles: [],
-  asyncBattles: [], // For async challenges
-  questions: [],
-  savedQuestions: [],
-  mistakes: [],
-  examResults: [],
-  questTemplates: [], // Admin templates
-  examPacks: [] // ... (Mock data from before)
-};
-
-// Connect to MongoDB
-mongoose.connect(MONGODB_URI, {
-  serverSelectionTimeoutMS: 5000, 
-  socketTimeoutMS: 45000,
-})
+// Robust Connection Logic
+if (MONGODB_URI) {
+  mongoose.connect(MONGODB_URI, {
+    serverSelectionTimeoutMS: 5000,
+  })
   .then(() => console.log('✅ Connected to MongoDB Atlas'))
-  .catch(err => console.error('⚠️ MongoDB Connection Failed. Switching to In-Memory Fallback mode.'));
+  .catch(err => {
+    console.error('❌ MongoDB Connection Error:', err.message);
+    console.log('⚠️ Running in In-Memory Fallback mode due to connection failure.');
+  });
+} else {
+  console.log('⚠️ No MONGODB_URI environment variable found.');
+  console.log('⚠️ Running in In-Memory Fallback mode.');
+}
 
 // Helper to check DB status
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
+// --- In-Memory Fallback Storage ---
+const memoryDb = {
+  users: [],
+  payments: [],
+  notifications: [
+    { _id: '1', title: 'System', message: 'Running in fallback mode', type: 'WARNING', date: Date.now(), target: 'ALL' }
+  ],
+  asyncBattles: [],
+  questions: [],
+  savedQuestions: [],
+  mistakes: [],
+  examResults: []
+};
+
 // --- Schemas & Models (Mongoose) ---
-
-const questTemplateSchema = new mongoose.Schema({
-  title: String,
-  description: String,
-  type: String, 
-  target: Number,
-  reward: Number,
-  icon: String,
-  link: String,
-  category: { type: String, enum: ['DAILY', 'WEEKLY'], default: 'DAILY' },
-  isActive: { type: Boolean, default: true }
-});
-const QuestTemplate = mongoose.model('QuestTemplate', questTemplateSchema);
-
-const questSchema = new mongoose.Schema({
-  id: String,
-  title: String,
-  description: String,
-  type: String,
-  target: Number,
-  progress: { type: Number, default: 0 },
-  reward: Number,
-  completed: { type: Boolean, default: false },
-  claimed: { type: Boolean, default: false },
-  icon: String,
-  link: String,
-  category: String
-}, { _id: false });
 
 const userSchema = new mongoose.Schema({
   uid: { type: String, required: true, unique: true },
@@ -85,58 +61,23 @@ const userSchema = new mongoose.Schema({
   points: { type: Number, default: 0 },
   totalExams: { type: Number, default: 0 },
   lastLogin: { type: Number, default: Date.now },
-  createdAt: { type: Number, default: Date.now },
-  stats: {
-    totalCorrect: { type: Number, default: 0 },
-    totalWrong: { type: Number, default: 0 },
-    totalSkipped: { type: Number, default: 0 },
-    subjectStats: { type: Map, of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), default: {} },
-    topicStats: { type: Map, of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), default: {} }
-  },
-  dailyQuests: [questSchema],
-  weeklyQuests: [questSchema],
-  lastQuestReset: { type: Number, default: 0 },
-  lastWeeklyQuestReset: { type: Number, default: 0 }
+  stats: { type: Object, default: {} },
+  dailyQuests: Array,
+  weeklyQuests: Array
 });
 const User = mongoose.model('User', userSchema);
-
-const paymentSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  userName: String,
-  userEmail: String,
-  courseId: String,
-  courseTitle: String,
-  amount: Number,
-  trxId: { type: String, required: true },
-  senderNumber: { type: String, required: true },
-  status: { type: String, default: 'PENDING', enum: ['PENDING', 'APPROVED', 'REJECTED'] },
-  timestamp: { type: Number, default: Date.now }
-});
-const Payment = mongoose.model('Payment', paymentSchema);
 
 const notificationSchema = new mongoose.Schema({
   title: String,
   message: String,
   type: { type: String, enum: ['INFO', 'WARNING', 'SUCCESS', 'BATTLE_CHALLENGE', 'BATTLE_RESULT'] },
   date: { type: Number, default: Date.now },
-  target: { type: String, default: 'ALL' }, // 'ALL' or specific userId
+  target: { type: String, default: 'ALL' }, // 'ALL' or userId
   actionLink: String,
-  metadata: mongoose.Schema.Types.Mixed
+  metadata: mongoose.Schema.Types.Mixed,
+  read: { type: Boolean, default: false }
 });
-notificationSchema.index({ target: 1 });
 const Notification = mongoose.model('Notification', notificationSchema);
-
-const battleSchema = new mongoose.Schema({
-  roomId: { type: String, required: true, unique: true },
-  hostId: String,
-  createdAt: { type: Number, default: Date.now },
-  status: { type: String, enum: ['WAITING', 'ACTIVE', 'FINISHED'], default: 'WAITING' },
-  startTime: Number,
-  questions: Array,
-  config: Object,
-  players: Array
-});
-const Battle = mongoose.model('Battle', battleSchema);
 
 const asyncBattleSchema = new mongoose.Schema({
     challengerId: String,
@@ -149,51 +90,48 @@ const asyncBattleSchema = new mongoose.Schema({
     questions: Array,
     challengerScore: Number,
     opponentScore: Number,
+    challengerAnswers: Array, // Added for analysis
+    opponentAnswers: Array,   // Added for analysis
     winnerId: String,
     createdAt: { type: Number, default: Date.now }
 });
 const AsyncBattle = mongoose.model('AsyncBattle', asyncBattleSchema);
 
+const paymentSchema = new mongoose.Schema({
+  userId: String,
+  userName: String,
+  courseTitle: String,
+  amount: Number,
+  trxId: String,
+  senderNumber: String,
+  status: { type: String, default: 'PENDING' },
+  timestamp: { type: Number, default: Date.now }
+});
+const Payment = mongoose.model('Payment', paymentSchema);
+
 const questionBankSchema = new mongoose.Schema({
-  subject: { type: String, required: true },
-  chapter: { type: String, required: true },
+  subject: String,
+  chapter: String,
   topic: String,
-  question: { type: String, required: true },
-  options: { type: [String], required: true },
-  correctAnswerIndex: { type: Number, required: true },
+  question: String,
+  options: [String],
+  correctAnswerIndex: Number,
   explanation: String,
-  difficulty: { type: String, default: 'MEDIUM' },
+  difficulty: String,
   createdAt: { type: Number, default: Date.now }
 });
 const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
 
-// ... (Other schemas like SavedQuestion, Mistake, ExamResult remain same) ...
-const savedQuestionSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'QuestionBank' },
-  folder: { type: String, default: 'General' },
-  savedAt: { type: Number, default: Date.now }
-});
-const SavedQuestion = mongoose.model('SavedQuestion', savedQuestionSchema);
-
-const mistakeSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  question: { type: String, required: true },
-  // ... fields from frontend model
-  wrongCount: { type: Number, default: 1 },
-  lastMissed: { type: Number, default: Date.now }
-});
-const Mistake = mongoose.model('Mistake', mistakeSchema);
-
 const examResultSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  subject: { type: String, required: true },
+  userId: String,
+  subject: String,
+  score: Number,
   totalQuestions: Number,
   correct: Number,
   wrong: Number,
   skipped: Number,
-  score: Number,
   topicStats: Array,
+  mistakes: Array,
   timestamp: { type: Number, default: Date.now }
 });
 const ExamResult = mongoose.model('ExamResult', examResultSchema);
@@ -201,15 +139,14 @@ const ExamResult = mongoose.model('ExamResult', examResultSchema);
 // --- ROUTES ---
 
 app.get('/', (req, res) => {
-  res.send('API Running');
+  res.send('Dhrubok API Running');
 });
 
-// --- NOTIFICATIONS WITH USER TARGETING ---
+// --- NOTIFICATIONS ---
 app.get('/api/users/:userId/notifications', async (req, res) => {
     try {
         const { userId } = req.params;
         if (isDbConnected()) {
-            // Fetch global + user specific
             const notifs = await Notification.find({ 
                 $or: [{ target: 'ALL' }, { target: userId }] 
             }).sort({ date: -1 }).limit(20);
@@ -221,7 +158,8 @@ app.get('/api/users/:userId/notifications', async (req, res) => {
                 type: n.type,
                 date: n.date,
                 actionLink: n.actionLink,
-                metadata: n.metadata
+                metadata: n.metadata,
+                read: false // Client handles read state via localStorage overlay
             }));
             res.json(formatted);
         } else {
@@ -231,38 +169,49 @@ app.get('/api/users/:userId/notifications', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// --- ASYNC BATTLE LOGIC ---
+// --- ASYNC BATTLE ---
+
+// Create Battle Challenge
 app.post('/api/battles/async/create', async (req, res) => {
     try {
-        const { challengerId, challengerName, opponentId, opponentName, subject, chapter, questions, challengerScore } = req.body;
+        const { 
+            challengerId, challengerName, opponentId, opponentName, 
+            subject, chapter, questions, challengerScore, challengerAnswers 
+        } = req.body;
         
         const battleData = {
             challengerId, challengerName, opponentId, opponentName, 
-            subject, chapter, questions, challengerScore,
+            subject, chapter, questions, challengerScore, challengerAnswers,
             status: 'PENDING', createdAt: Date.now()
         };
 
         let savedBattle;
         if(isDbConnected()) {
             savedBattle = await new AsyncBattle(battleData).save();
+            
             // Notify Opponent
             await new Notification({
-                title: `Battle Challenge!`,
-                message: `${challengerName} has challenged you in ${subject} (${chapter}).`,
+                title: `⚔️ Battle Challenge!`,
+                message: `${challengerName} আপনাকে ${subject}-এ চ্যালেঞ্জ করেছে! স্কোর বিট করতে পারবেন?`,
                 type: 'BATTLE_CHALLENGE',
                 target: opponentId,
                 date: Date.now(),
-                actionLink: `/quiz`, // Frontend will handle config loading via metadata
-                metadata: { battleId: savedBattle._id.toString(), challengerName, questions }
+                actionLink: `/quiz`, 
+                metadata: { 
+                    battleId: savedBattle._id.toString(), 
+                    challengerName, 
+                    questions 
+                }
             }).save();
         } else {
             savedBattle = { ...battleData, _id: Date.now().toString() };
             memoryDb.asyncBattles.push(savedBattle);
-            // Mock notify
+            
+            // Mock notification
             memoryDb.notifications.unshift({
                 _id: Date.now().toString(),
-                title: `Battle Challenge!`,
-                message: `${challengerName} has challenged you in ${subject}.`,
+                title: `⚔️ Battle Challenge!`,
+                message: `${challengerName} আপনাকে ${subject}-এ চ্যালেঞ্জ করেছে!`,
                 type: 'BATTLE_CHALLENGE',
                 target: opponentId,
                 date: Date.now(),
@@ -273,9 +222,10 @@ app.post('/api/battles/async/create', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
+// Complete Battle (Opponent Played)
 app.post('/api/battles/async/:id/complete', async (req, res) => {
     try {
-        const { opponentId, opponentScore } = req.body;
+        const { opponentId, opponentScore, opponentAnswers } = req.body;
         const battleId = req.params.id;
         
         let battle;
@@ -288,38 +238,46 @@ app.post('/api/battles/async/:id/complete', async (req, res) => {
         if(!battle) return res.status(404).json({error: "Battle not found"});
 
         battle.opponentScore = opponentScore;
+        battle.opponentAnswers = opponentAnswers;
         battle.status = 'COMPLETED';
         
         // Determine Winner
         let resultMsg = "";
         let winnerId = null;
         if (battle.challengerScore > opponentScore) {
-            resultMsg = `${battle.challengerName} won! (${battle.challengerScore} vs ${opponentScore})`;
+            resultMsg = `দুঃখিত! ${battle.challengerName} জিতেছে (${battle.challengerScore} vs ${opponentScore})`;
             winnerId = battle.challengerId;
         } else if (opponentScore > battle.challengerScore) {
-            resultMsg = `${battle.opponentName} won! (${opponentScore} vs ${battle.challengerScore})`;
+            resultMsg = `অভিনন্দন! আপনি জিতেছেন! (${opponentScore} vs ${battle.challengerScore})`;
             winnerId = battle.opponentId;
         } else {
-            resultMsg = `It's a draw! (${opponentScore} pts)`;
+            resultMsg = `ড্র হয়েছে! (${opponentScore} পয়েন্ট)`;
         }
         battle.winnerId = winnerId;
 
         if (isDbConnected()) {
             await battle.save();
-            // Notify Challenger
+            
+            // Notify Challenger about result
+            const challengerMsg = winnerId === battle.challengerId 
+                ? `অভিনন্দন! আপনি ${battle.opponentName}-কে হারিয়েছেন!` 
+                : `${battle.opponentName} আপনার চ্যালেঞ্জ জিতে নিয়েছে!`;
+
             await new Notification({
-                title: `Battle Result vs ${battle.opponentName}`,
-                message: resultMsg,
+                title: `🏆 Battle Result: vs ${battle.opponentName}`,
+                message: challengerMsg,
                 type: 'BATTLE_RESULT',
                 target: battle.challengerId,
-                date: Date.now()
+                date: Date.now(),
+                metadata: { battleId: battle._id.toString(), result: 'WIN/LOSS' }
             }).save();
+
         } else {
             // Mock notify
              memoryDb.notifications.unshift({
                 _id: Date.now().toString(),
-                title: `Battle Result vs ${battle.opponentName}`,
-                message: resultMsg,
+                title: `🏆 Battle Result`,
+                message: `Result vs ${battle.opponentName} is ready.`,
                 type: 'BATTLE_RESULT',
                 target: battle.challengerId,
                 date: Date.now()
@@ -330,8 +288,118 @@ app.post('/api/battles/async/:id/complete', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// ... (Rest of existing endpoints: /api/admin/*, /api/users/sync, etc. kept as is) ...
-// Ensure fallback logic is robust for all existing endpoints
+// --- ADMIN & PAYMENTS ---
+app.post('/api/payments', async (req, res) => {
+    try {
+        const paymentData = req.body;
+        if(isDbConnected()) {
+            await new Payment(paymentData).save();
+        } else {
+            memoryDb.payments.push({ ...paymentData, _id: Date.now().toString() });
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/admin/payments', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            const payments = await Payment.find().sort({ timestamp: -1 });
+            res.json(payments.map(p => ({ ...p.toObject(), id: p._id })));
+        } else {
+            res.json(memoryDb.payments.map(p => ({ ...p, id: p._id })));
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.post('/api/admin/notifications', async (req, res) => {
+    try {
+        const { title, message, type, target } = req.body;
+        if(isDbConnected()) {
+            await new Notification({ title, message, type, target: target || 'ALL' }).save();
+        } else {
+            memoryDb.notifications.unshift({ _id: Date.now().toString(), title, message, type, target: 'ALL', date: Date.now() });
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// --- USER SYNC & STATS ---
+app.post('/api/users/sync', async (req, res) => {
+    try {
+        const userData = req.body;
+        if(isDbConnected()) {
+            await User.findOneAndUpdate({ uid: userData.uid }, userData, { upsert: true, new: true });
+        } else {
+            const idx = memoryDb.users.findIndex(u => u.uid === userData.uid);
+            if(idx >= 0) memoryDb.users[idx] = { ...memoryDb.users[idx], ...userData };
+            else memoryDb.users.push(userData);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/users/:userId/stats', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        let user;
+        if(isDbConnected()) {
+            user = await User.findOne({ uid: userId });
+        } else {
+            user = memoryDb.users.find(u => u.uid === userId);
+        }
+        
+        if (user) res.json(user);
+        else res.json({ points: 0, totalExams: 0 });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// --- EXAM RESULTS & Q-BANK ---
+app.post('/api/users/:userId/exam-results', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const resultData = req.body;
+        
+        if(isDbConnected()) {
+            await new ExamResult({ userId, ...resultData }).save();
+            // Update User Stats logic would go here (points increment etc)
+            await User.updateOne({ uid: userId }, { 
+                $inc: { 
+                    points: resultData.score, 
+                    totalExams: 1,
+                    'stats.totalCorrect': resultData.correct,
+                    'stats.totalWrong': resultData.wrong
+                } 
+            });
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.post('/api/admin/questions/bulk', async (req, res) => {
+    try {
+        const { questions } = req.body;
+        if(isDbConnected()) {
+            await QuestionBank.insertMany(questions);
+        } else {
+            memoryDb.questions.push(...questions);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// --- LEADERBOARD ---
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        let users;
+        if (isDbConnected()) {
+            users = await User.find().sort({ points: -1 }).limit(50);
+        } else {
+            users = memoryDb.users.sort((a,b) => b.points - a.points).slice(0, 50);
+        }
+        res.json(users);
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
