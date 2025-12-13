@@ -129,9 +129,9 @@ const userSchema = new mongoose.Schema({
     topicStats: { type: Map, of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), default: {} }
   },
   dailyQuests: [questSchema],
-  weeklyQuests: [questSchema], // New: Weekly Quests
+  weeklyQuests: [questSchema],
   lastQuestReset: { type: Number, default: 0 },
-  lastWeeklyQuestReset: { type: Number, default: 0 } // New: Tracker for weekly reset
+  lastWeeklyQuestReset: { type: Number, default: 0 }
 });
 const User = mongoose.model('User', userSchema);
 
@@ -152,9 +152,11 @@ const Payment = mongoose.model('Payment', paymentSchema);
 const notificationSchema = new mongoose.Schema({
   title: String,
   message: String,
-  type: { type: String, enum: ['INFO', 'WARNING', 'SUCCESS'] },
+  type: { type: String, enum: ['INFO', 'WARNING', 'SUCCESS', 'BATTLE_CHALLENGE', 'BATTLE_RESULT'] },
   date: { type: Number, default: Date.now },
-  target: { type: String, default: 'ALL' }
+  target: { type: String, default: 'ALL' },
+  actionLink: String,
+  metadata: Object
 });
 const Notification = mongoose.model('Notification', notificationSchema);
 
@@ -194,9 +196,11 @@ const questionBankSchema = new mongoose.Schema({
   correctAnswerIndex: { type: Number, required: true },
   explanation: String,
   difficulty: { type: String, default: 'MEDIUM' },
+  examRef: { type: String }, // NEW FIELD: To link questions to a specific exam paper ID
   createdAt: { type: Number, default: Date.now }
 });
 questionBankSchema.index({ subject: 1, chapter: 1, topic: 1 });
+questionBankSchema.index({ examRef: 1 });
 const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
 
 const savedQuestionSchema = new mongoose.Schema({
@@ -256,22 +260,7 @@ app.get('/', (req, res) => {
   res.send(`🚀 Dhrubok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
 });
 
-// --- HELPER: QUEST GENERATOR ---
-const DEFAULT_QUESTS = [
-    // Daily - REBALANCED FOR HARDER ECONOMY
-    { title: 'Exam Warrior', description: 'যেকোনো ১টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 1, reward: 25, icon: 'FileCheck', link: '/quiz', category: 'DAILY' },
-    { title: 'Battle Ready', description: '১টি কুইজ ব্যাটল খেলো', type: 'PLAY_BATTLE', target: 1, reward: 30, icon: 'Swords', link: '/battle', category: 'DAILY' },
-    { title: 'Knowledge Keeper', description: '২টি প্রশ্ন সেভ করো', type: 'SAVE_QUESTION', target: 2, reward: 20, icon: 'Bookmark', link: '/quiz', category: 'DAILY' },
-    { title: 'Daily Learner', description: '২০ মিনিট পড়ো', type: 'STUDY_TIME', target: 20, reward: 40, icon: 'Clock', link: '/tracker', category: 'DAILY' },
-    { title: 'Curious Mind', description: 'AI টিউটরকে ১টি প্রশ্ন করো', type: 'ASK_AI', target: 1, reward: 15, icon: 'Bot', link: 'SYNAPSE', category: 'DAILY' },
-    { title: 'Sharpshooter', description: 'কুইজে ৮০% মার্ক পাও', type: 'HIGH_SCORE', target: 1, reward: 50, icon: 'Target', link: '/quiz', category: 'DAILY' },
-    { title: 'Deep Diver', description: 'প্রশ্ন ব্যাংক থেকে ১০টি প্রশ্ন প্র্যাকটিস করো', type: 'EXAM_COMPLETE', target: 1, reward: 30, icon: 'Database', link: '/qbank', category: 'DAILY' },
-    // Weekly - REBALANCED
-    { title: 'Weekly Exam Master', description: 'এই সপ্তাহে ৫টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 5, reward: 150, icon: 'Trophy', link: '/quiz', category: 'WEEKLY' },
-    { title: 'Syllabus Crusher', description: 'যেকোনো অধ্যায়ের উপর পরীক্ষা দাও', type: 'EXAM_COMPLETE', target: 1, reward: 100, icon: 'BookOpen', link: '/quiz', category: 'WEEKLY' },
-    { title: 'Consistency King', description: 'টানা ৩ দিন অ্যাপ ব্যবহার করো', type: 'LOGIN', target: 3, reward: 150, icon: 'Calendar', link: '#', category: 'WEEKLY' },
-    { title: 'Battle Royale', description: '৫টি ব্যাটল জিতো', type: 'WIN_BATTLE', target: 5, reward: 250, icon: 'Crown', link: '/battle', category: 'WEEKLY' }
-];
+// --- QUEST ROUTES ---
 
 const getQuestsFromPool = async (category, count) => {
     let pool = [];
@@ -280,13 +269,20 @@ const getQuestsFromPool = async (category, count) => {
     } else {
         pool = memoryDb.questTemplates.filter(q => q.category === category && q.isActive);
     }
-
-    // Fallback if empty (seed logic)
     if (pool.length === 0) {
+        // Defaults if DB is empty
+        const DEFAULT_QUESTS = [
+            { title: 'Exam Warrior', description: 'যেকোনো ১টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 1, reward: 25, icon: 'FileCheck', link: '/quiz', category: 'DAILY' },
+            { title: 'Knowledge Seeker', description: 'AI টিউটরকে ১টি প্রশ্ন করো', type: 'ASK_AI', target: 1, reward: 15, icon: 'Bot', link: 'SYNAPSE', category: 'DAILY' },
+            { title: 'Battle Ready', description: '১টি কুইজ ব্যাটল খেলো', type: 'PLAY_BATTLE', target: 1, reward: 50, icon: 'Swords', link: '/battle', category: 'DAILY' },
+            { title: 'Focus Master', description: '৩০ মিনিট পড়াশোনা করো', type: 'STUDY_TIME', target: 30, reward: 40, icon: 'Clock', link: '/tracker', category: 'DAILY' },
+            { title: 'Curious Mind', description: '১টি প্রশ্ন বুকমার্ক করো', type: 'SAVE_QUESTION', target: 1, reward: 10, icon: 'Bookmark', link: '/quiz', category: 'DAILY' },
+            { title: 'Consistency King', description: '৭ দিন টানা লগইন করো', type: 'LOGIN', target: 7, reward: 200, icon: 'Crown', category: 'WEEKLY' },
+            { title: 'Battle Champion', description: '৩টি কুইজ ব্যাটল জিতো', type: 'WIN_BATTLE', target: 3, reward: 150, icon: 'Trophy', link: '/battle', category: 'WEEKLY' },
+            { title: 'Marathon Runner', description: '৫টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 5, reward: 100, icon: 'Zap', link: '/quiz', category: 'WEEKLY' }
+        ];
         pool = DEFAULT_QUESTS.filter(q => q.category === category);
     }
-
-    // Shuffle and pick
     return pool.sort(() => 0.5 - Math.random()).slice(0, count).map(q => ({
         id: q._id ? q._id.toString() : Math.random().toString(),
         title: q.title,
@@ -303,7 +299,6 @@ const getQuestsFromPool = async (category, count) => {
     }));
 };
 
-// --- ADMIN QUEST ROUTES ---
 app.post('/api/admin/quests', async (req, res) => {
     try {
         const questData = { ...req.body, isActive: true };
@@ -341,18 +336,17 @@ app.delete('/api/admin/quests/:id', async (req, res) => {
 // --- USERS & SYNC ---
 app.post('/api/users/sync', async (req, res) => {
   try {
-    const { uid, email, displayName, photoURL, college, hscBatch, department, target } = req.body;
-    const updateData = { uid, email, displayName, photoURL, lastLogin: Date.now(), college, hscBatch, department, target };
+    const { uid, email, displayName, photoURL, college, hscBatch, department, target, phoneNumber } = req.body;
+    const updateData = { uid, email, displayName, photoURL, lastLogin: Date.now(), college, hscBatch, department, target, phoneNumber };
+    // Remove undefined keys
     Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
 
     if (isDbConnected()) {
       let user = await User.findOne({ uid });
       const now = new Date();
-      
-      // Daily Reset Logic (Midnight)
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
       
-      // Weekly Reset Logic (Next Saturday Midnight)
+      // Weekly Reset Logic (Saturday Midnight)
       const day = now.getDay();
       const daysUntilSaturday = (6 - day + 7) % 7;
       const nextSaturday = new Date(now);
@@ -369,12 +363,12 @@ app.post('/api/users/sync', async (req, res) => {
           updateData.lastQuestReset = todayStart;
           updateData.lastWeeklyQuestReset = nextWeeklyResetTime;
       } else {
-          // Check Daily
+          // Daily Reset
           if (!user.lastQuestReset || user.lastQuestReset < todayStart) {
               dailyQuestsToSet = await getQuestsFromPool('DAILY', 5);
               updateData.lastQuestReset = todayStart;
           }
-          // Check Weekly
+          // Weekly Reset
           if (!user.lastWeeklyQuestReset || Date.now() > user.lastWeeklyQuestReset) {
               weeklyQuestsToSet = await getQuestsFromPool('WEEKLY', 3);
               updateData.lastWeeklyQuestReset = nextWeeklyResetTime;
@@ -387,7 +381,6 @@ app.post('/api/users/sync', async (req, res) => {
       user = await User.findOneAndUpdate({ uid }, updateData, { upsert: true, new: true });
       return res.json(user);
     } else {
-      // Memory DB fallback (Simplified)
       let user = memoryDb.users.find(u => u.uid === uid);
       if (!user) { 
           user = { 
@@ -410,25 +403,26 @@ app.post('/api/users/sync', async (req, res) => {
 app.post('/api/quests/update', async (req, res) => {
     try {
         const { userId, actionType, value } = req.body; 
-        
         if (isDbConnected()) {
             const user = await User.findOne({ uid: userId });
             if (!user) return res.status(404).json({ error: 'User not found' });
-
+            
             let updated = false;
             
             // Update Daily
-            user.dailyQuests = user.dailyQuests.map(q => {
-                if (q.type === actionType && !q.completed) {
-                    q.progress += value;
-                    if (q.progress >= q.target) {
-                        q.progress = q.target;
-                        q.completed = true;
+            if (user.dailyQuests) {
+                user.dailyQuests = user.dailyQuests.map(q => {
+                    if (q.type === actionType && !q.completed) {
+                        q.progress += value;
+                        if (q.progress >= q.target) {
+                            q.progress = q.target;
+                            q.completed = true;
+                        }
+                        updated = true;
                     }
-                    updated = true;
-                }
-                return q;
-            });
+                    return q;
+                });
+            }
 
             // Update Weekly
             if (user.weeklyQuests) {
@@ -447,26 +441,23 @@ app.post('/api/quests/update', async (req, res) => {
 
             if (updated) await user.save();
             res.json({ success: true, quests: user.dailyQuests, weeklyQuests: user.weeklyQuests });
-        } else {
-             // Memory logic...
-            res.json({ success: true });
-        }
+        } else { res.json({ success: true }); }
     } catch(e) { res.status(500).json({ error: 'Quest update failed' }); }
 });
 
 app.post('/api/quests/claim', async (req, res) => {
     try {
-        const { userId, questId, category } = req.body; // Added category
+        const { userId, questId, category } = req.body; 
         if(isDbConnected()) {
             const user = await User.findOne({ uid: userId });
-            
             let quest;
+            
             if (category === 'WEEKLY') {
                 quest = user.weeklyQuests.find(q => q.id === questId);
             } else {
                 quest = user.dailyQuests.find(q => q.id === questId);
             }
-            
+
             if (quest && quest.completed && !quest.claimed) {
                 quest.claimed = true;
                 user.points += quest.reward;
@@ -475,10 +466,7 @@ app.post('/api/quests/claim', async (req, res) => {
             } else {
                 res.status(400).json({ error: 'Cannot claim' });
             }
-        } else {
-            // Memory logic
-            res.json({ success: true, points: 100 });
-        }
+        } else { res.json({ success: true, points: 100 }); }
     } catch(e) { res.status(500).json({ error: 'Claim failed' }); }
 });
 
@@ -511,15 +499,12 @@ app.get('/api/admin/payments', async (req, res) => {
     try {
         if(isDbConnected()) {
             const payments = await Payment.find().sort({ timestamp: -1 });
-             // Map _id to id for frontend compatibility
             const formattedPayments = payments.map(p => {
                 const obj = p.toObject();
                 return { ...obj, id: obj._id.toString() };
             });
             res.json(formattedPayments);
-        } else {
-            res.json(memoryDb.payments);
-        }
+        } else { res.json(memoryDb.payments); }
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
@@ -569,9 +554,7 @@ app.get('/api/notifications', async (req, res) => {
                 return { ...obj, id: obj._id.toString() };
             });
             res.json(formattedNotifs);
-        } else {
-            res.json(memoryDb.notifications);
-        }
+        } else { res.json(memoryDb.notifications); }
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
@@ -605,12 +588,11 @@ app.get('/api/exam-packs', async (req, res) => {
         if(isDbConnected()) {
             const packs = await ExamPack.find();
             res.json(packs.length ? packs : memoryDb.examPacks);
-        } else {
-            res.json(memoryDb.examPacks);
-        }
+        } else { res.json(memoryDb.examPacks); }
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
+// --- USER DATA ---
 app.get('/api/users/:userId/enrollments', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -647,15 +629,7 @@ app.get('/api/users/:userId/stats', async (req, res) => {
         })).sort((a,b) => b.accuracy - a.accuracy);
 
         res.json({
-            user: { 
-                displayName: user.displayName, // Return displayName
-                photoURL: user.photoURL,       // Return photoURL
-                college: user.college, 
-                hscBatch: user.hscBatch, 
-                department: user.department, 
-                target: user.target, 
-                points: user.points 
-            },
+            user: { displayName: user.displayName, photoURL: user.photoURL, college: user.college, hscBatch: user.hscBatch, department: user.department, target: user.target, points: user.points, phoneNumber: user.phoneNumber },
             points: user.points,
             totalExams: user.totalExams,
             totalCorrect: user.stats?.totalCorrect || 0,
@@ -664,7 +638,7 @@ app.get('/api/users/:userId/stats', async (req, res) => {
             strongestTopics: topicBreakdown.slice(0, 5),
             weakestTopics: topicBreakdown.slice().reverse().slice(0, 5),
             quests: user.dailyQuests || [],
-            weeklyQuests: user.weeklyQuests || [] // Include weekly
+            weeklyQuests: user.weeklyQuests || []
         });
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
@@ -677,6 +651,8 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
         
         if (isDbConnected()) {
             await new ExamResult(examResultData).save();
+            
+            // Save mistakes
             if (mistakes && mistakes.length > 0) {
                 const bulkOps = mistakes.map(m => ({
                     updateOne: {
@@ -687,13 +663,12 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                 }));
                 await Mistake.bulkWrite(bulkOps);
             }
+
+            // Update User Stats
             const user = await User.findOne({ uid: userId });
             if (user) {
                 if (!user.stats) user.stats = { totalCorrect:0, totalWrong:0, totalSkipped:0, subjectStats: {}, topicStats: {} };
-                
-                // Reduced points for exam completion to prevent inflation
                 user.points = (user.points || 0) + (resultData.correct * 5) + 10; 
-                
                 user.totalExams = (user.totalExams || 0) + 1;
                 user.stats.totalCorrect = (user.stats.totalCorrect || 0) + resultData.correct;
                 user.stats.totalWrong = (user.stats.totalWrong || 0) + resultData.wrong;
@@ -713,31 +688,60 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
         } else {
             memoryDb.examResults.push(examResultData);
             if (mistakes) mistakes.forEach(m => memoryDb.mistakes.push({ ...m, userId, _id: Date.now() }));
-            // Memory user update simplified...
         }
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
 // --- SAVED QUESTIONS ---
+app.post('/api/users/:userId/saved-questions', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { questionId, folder = 'General' } = req.body;
+        if(isDbConnected()) {
+            await new SavedQuestion({ userId, questionId, folder }).save();
+        } else {
+            memoryDb.savedQuestions.push({ userId, questionId, folder, _id: Date.now().toString() });
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
 app.get('/api/users/:userId/saved-questions', async (req, res) => {
     try {
+        const { userId } = req.params;
         if(isDbConnected()) {
-            const saved = await SavedQuestion.find({ userId: req.params.userId }).populate('questionId');
-            res.json(saved.filter(s => s.questionId)); 
+            const saved = await SavedQuestion.find({ userId }).populate('questionId');
+            res.json(saved);
         } else {
-            res.json(memoryDb.savedQuestions.filter(s => s.userId === req.params.userId));
+            // Mock population for memory mode
+            const saved = memoryDb.savedQuestions.filter(s => s.userId === userId).map(s => {
+                const q = memoryDb.questions.find(mq => mq._id === s.questionId);
+                return { ...s, questionId: q };
+            });
+            res.json(saved);
         }
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-app.post('/api/users/:userId/saved-questions', async (req, res) => {
+app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
     try {
-        const { questionId, folder } = req.body;
         if(isDbConnected()) {
-            await new SavedQuestion({ userId: req.params.userId, questionId, folder: folder || 'General' }).save();
+            await SavedQuestion.findByIdAndDelete(req.params.id);
         } else {
-            memoryDb.savedQuestions.push({ userId: req.params.userId, questionId, folder: folder || 'General', _id: Date.now().toString() });
+            memoryDb.savedQuestions = memoryDb.savedQuestions.filter(s => s._id !== req.params.id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.delete('/api/users/:userId/saved-questions/by-q/:questionId', async (req, res) => {
+    try {
+        const { userId, questionId } = req.params;
+        if(isDbConnected()) {
+            await SavedQuestion.findOneAndDelete({ userId, questionId });
+        } else {
+            memoryDb.savedQuestions = memoryDb.savedQuestions.filter(s => s.questionId !== questionId || s.userId !== userId);
         }
         res.json({ success: true });
     } catch(e) { res.status(500).json({error: e.message}); }
@@ -746,21 +750,12 @@ app.post('/api/users/:userId/saved-questions', async (req, res) => {
 app.patch('/api/users/:userId/saved-questions/:id', async (req, res) => {
     try {
         const { folder } = req.body;
-        if(isDbConnected()) await SavedQuestion.findByIdAndUpdate(req.params.id, { folder });
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
-    try {
-        if(isDbConnected()) await SavedQuestion.findByIdAndDelete(req.params.id);
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.delete('/api/users/:userId/saved-questions/by-q/:qId', async (req, res) => {
-    try {
-        if(isDbConnected()) await SavedQuestion.findOneAndDelete({ userId: req.params.userId, questionId: req.params.qId });
+        if(isDbConnected()) {
+            await SavedQuestion.findByIdAndUpdate(req.params.id, { folder });
+        } else {
+            const s = memoryDb.savedQuestions.find(x => x._id === req.params.id);
+            if(s) s.folder = folder;
+        }
         res.json({ success: true });
     } catch(e) { res.status(500).json({error: e.message}); }
 });
@@ -768,18 +763,23 @@ app.delete('/api/users/:userId/saved-questions/by-q/:qId', async (req, res) => {
 // --- MISTAKES ---
 app.get('/api/users/:userId/mistakes', async (req, res) => {
     try {
+        const { userId } = req.params;
         if(isDbConnected()) {
-            const mistakes = await Mistake.find({ userId: req.params.userId });
+            const mistakes = await Mistake.find({ userId }).sort({ lastMissed: -1 });
             res.json(mistakes);
         } else {
-            res.json(memoryDb.mistakes.filter(m => m.userId === req.params.userId));
+            res.json(memoryDb.mistakes.filter(m => m.userId === userId));
         }
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
 app.delete('/api/users/:userId/mistakes/:id', async (req, res) => {
     try {
-        if(isDbConnected()) await Mistake.findByIdAndDelete(req.params.id);
+        if(isDbConnected()) {
+            await Mistake.findByIdAndDelete(req.params.id);
+        } else {
+            memoryDb.mistakes = memoryDb.mistakes.filter(m => m._id !== req.params.id);
+        }
         res.json({ success: true });
     } catch(e) { res.status(500).json({error: e.message}); }
 });
@@ -812,29 +812,27 @@ app.post('/api/admin/questions/bulk', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
+// --- EXAM REF SPECIFIC ROUTE ---
+app.get('/api/quiz/past-paper/:examRef', async (req, res) => {
+    try {
+        const { examRef } = req.params;
+        if (isDbConnected()) {
+            const questions = await QuestionBank.find({ examRef });
+            res.json(questions);
+        } else {
+            const questions = memoryDb.questions.filter(q => q.examRef === examRef);
+            res.json(questions);
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.delete('/api/admin/questions/:id', async (req, res) => {
     try {
         if(isDbConnected()) await QuestionBank.findByIdAndDelete(req.params.id);
         else memoryDb.questions = memoryDb.questions.filter(q => q._id !== req.params.id);
         res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-// --- QUIZ & SYLLABUS ---
-app.get('/api/quiz/syllabus-stats', async (req, res) => {
-    try {
-        if(isDbConnected()) {
-            const stats = await QuestionBank.aggregate([{ $group: { _id: { subject: "$subject", chapter: "$chapter", topic: "$topic" }, count: { $sum: 1 } } }]);
-            const result = {};
-            stats.forEach(({ _id, count }) => {
-                if(!result[_id.subject]) result[_id.subject] = { total: 0, chapters: {} };
-                result[_id.subject].total += count;
-                if(!result[_id.subject].chapters[_id.chapter]) result[_id.subject].chapters[_id.chapter] = { total: 0, topics: {} };
-                result[_id.subject].chapters[_id.chapter].total += count;
-                result[_id.subject].chapters[_id.chapter].topics[_id.topic || 'General'] = count;
-            });
-            res.json(result);
-        } else { res.json({}); }
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
@@ -845,173 +843,42 @@ app.post('/api/quiz/generate-from-db', async (req, res) => {
         if(topics && topics.length > 0) query.topic = { $in: topics };
 
         if(isDbConnected()) {
-            const questions = await QuestionBank.aggregate([{ $match: query }, { $sample: { size: count } }]);
+            // Random sampling using aggregate
+            const questions = await QuestionBank.aggregate([
+                { $match: query },
+                { $sample: { size: count } }
+            ]);
             res.json(questions);
         } else {
-            let qs = memoryDb.questions.filter(q => q.subject === subject && q.chapter === chapter);
-            if(topics && topics.length > 0) qs = qs.filter(q => topics.includes(q.topic));
-            res.json(qs.slice(0, count));
+            const qs = memoryDb.questions.filter(q => q.subject === subject && q.chapter === chapter && (!topics || topics.includes(q.topic)));
+            res.json(qs.sort(() => 0.5 - Math.random()).slice(0, count));
         }
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// --- BATTLE ROUTES ---
-app.post('/api/battles/create', async (req, res) => {
-  try {
-    const { userId, userName, avatar, config } = req.body;
-    const roomId = Math.floor(100000 + Math.random() * 900000).toString(); 
-    
-    // Support multiple subjects and chapters query
-    const query = {
-        subject: { $in: config.subjects },
-        chapter: { $in: config.chapters }
-    };
-
-    let questions = [];
-    if (isDbConnected()) {
-        questions = await QuestionBank.aggregate([{ $match: query }, { $sample: { size: config.questionCount } }]);
-    } else {
-        questions = memoryDb.questions.filter(q => 
-            config.subjects.includes(q.subject) && 
-            config.chapters.includes(q.chapter)
-        ).slice(0, config.questionCount);
-    }
-    
-    // Check if enough questions found
-    if (questions.length === 0) {
-        return res.status(400).json({ error: 'নির্বাচিত অধ্যায়গুলোতে কোনো প্রশ্ন পাওয়া যায়নি। দয়া করে অন্য অধ্যায় নির্বাচন করুন।' });
-    }
-
-    const battleData = {
-      roomId, hostId: userId, config, questions,
-      players: [{ uid: userId, name: userName, avatar, score: 0, totalTimeTaken: 0, team: config.mode === '2v2' ? 'A' : 'NONE', answers: {} }],
-      status: 'WAITING'
-    };
-
-    if (isDbConnected()) { await new Battle(battleData).save(); } 
-    else { memoryDb.battles.push(battleData); }
-    res.json({ roomId });
-  } catch (e) { 
-      console.error(e);
-      res.status(500).json({ error: 'Failed to create battle' }); 
-  }
-});
-
-app.post('/api/battles/join', async (req, res) => {
-  try {
-    const { roomId, userId, userName, avatar } = req.body;
-    let battle;
-    if (isDbConnected()) battle = await Battle.findOne({ roomId });
-    else battle = memoryDb.battles.find(b => b.roomId === roomId);
-
-    if (!battle) return res.status(404).json({ error: 'Room not found' });
-    if (battle.status !== 'WAITING') return res.status(400).json({ error: 'Game already started' });
-
-    const exists = battle.players.find(p => p.uid === userId);
-    if (!exists) {
-        battle.players.push({ uid: userId, name: userName, avatar, score: 0, totalTimeTaken: 0, team: 'NONE', answers: {} });
-        if (isDbConnected()) await battle.save();
-    }
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: 'Failed to join battle' }); }
-});
-
-app.post('/api/battles/start', async (req, res) => {
+app.get('/api/quiz/syllabus-stats', async (req, res) => {
     try {
-        const { roomId, userId } = req.body;
-        let battle;
-        if (isDbConnected()) battle = await Battle.findOne({ roomId });
-        else battle = memoryDb.battles.find(b => b.roomId === roomId);
-
-        if (!battle) return res.status(404).json({ error: 'Room not found' });
-        if (battle.hostId !== userId) return res.status(403).json({ error: 'Only host can start' });
-
-        battle.status = 'ACTIVE';
-        battle.startTime = Date.now();
-        if (isDbConnected()) await battle.save();
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Failed to start' }); }
-});
-
-app.get('/api/battles/:roomId', async (req, res) => {
-  try {
-    let battle;
-    if (isDbConnected()) battle = await Battle.findOne({ roomId: req.params.roomId });
-    else battle = memoryDb.battles.find(b => b.roomId === req.params.roomId);
-    
-    if (!battle) return res.status(404).json({ error: 'Battle not found' });
-
-    // Auto-finish logic if time expired
-    if (battle.status === 'ACTIVE' && battle.startTime) {
-        const totalDuration = (battle.config.timePerQuestion * battle.questions.length) + 10; // 10s buffer
-        const elapsed = (Date.now() - battle.startTime) / 1000;
-        if (elapsed > totalDuration) {
-            battle.status = 'FINISHED';
-            if (isDbConnected()) await battle.save();
-        }
-    }
-
-    res.json(battle);
-  } catch (e) { res.status(500).json({ error: 'Failed to fetch battle' }); }
-});
-
-app.post('/api/battles/:roomId/answer', async (req, res) => {
-  try {
-    const { userId, isCorrect, questionIndex, selectedOption, timeTaken } = req.body;
-    let battle;
-    
-    // 1. Fetch current state
-    if (isDbConnected()) battle = await Battle.findOne({ roomId: req.params.roomId });
-    else battle = memoryDb.battles.find(b => b.roomId === req.params.roomId);
-
-    if (!battle) return res.status(404).json({ error: 'Battle not found' });
-    const player = battle.players.find(p => p.uid === userId);
-    
-    // Check if already answered using Map (for memory db) or checking key (for Mongoose map)
-    let hasAnswered = false;
-    if (isDbConnected()) {
-        hasAnswered = player.answers.has(questionIndex.toString());
-    } else {
-        hasAnswered = player.answers[questionIndex] !== undefined;
-    }
-
-    if (player && !hasAnswered) {
-        if(isCorrect) player.score += 50; // Increased battle reward to 50
-        
-        if (timeTaken) {
-            player.totalTimeTaken = (player.totalTimeTaken || 0) + timeTaken;
-        }
-
-        // 2. Save the answer
-        if (isDbConnected()) {
-            player.answers.set(questionIndex.toString(), selectedOption);
-            await battle.save();
-            
-            // --- CONCURRENCY FIX: Re-fetch to check if ALL players answered ---
-            // This handles the race condition where multiple players click simultaneously
-            battle = await Battle.findOne({ roomId: req.params.roomId });
-        } else {
-            player.answers[questionIndex] = selectedOption;
-        }
-
-        // 3. AUTO-SKIP LOGIC: Check if ALL players answered this question
-        const allAnswered = battle.players.every(p => {
-            if (isDbConnected()) return p.answers.has(questionIndex.toString());
-            return p.answers[questionIndex] !== undefined;
-        });
-
-        if (allAnswered) {
-            const durationPerQ = battle.config.timePerQuestion;
-            const targetElapsed = (questionIndex + 1) * durationPerQ;
-            
-            // Add 1000ms buffer so clients see the full time (e.g., 30s) instead of 28/29s due to latency
-            battle.startTime = Date.now() - (targetElapsed * 1000) + 1000;
-            
-            if (isDbConnected()) await battle.save();
-        }
-    }
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: 'Failed' }); }
+        if(isDbConnected()) {
+            const stats = await QuestionBank.aggregate([
+                { $group: {
+                    _id: { subject: "$subject", chapter: "$chapter", topic: "$topic" },
+                    count: { $sum: 1 }
+                }}
+            ]);
+            // Transform to nested structure
+            const result = {};
+            stats.forEach(item => {
+                const { subject, chapter, topic } = item._id;
+                if(!result[subject]) result[subject] = { total: 0, chapters: {} };
+                if(!result[subject].chapters[chapter]) result[subject].chapters[chapter] = { total: 0, topics: {} };
+                
+                result[subject].chapters[chapter].topics[topic] = item.count;
+                result[subject].chapters[chapter].total += item.count;
+                result[subject].total += item.count;
+            });
+            res.json(result);
+        } else { res.json({}); }
+    } catch(e) { res.status(500).json({error: e.message}); }
 });
 
 const PORT = process.env.PORT || 5000;
