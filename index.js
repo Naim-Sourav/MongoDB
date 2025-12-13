@@ -838,6 +838,61 @@ app.get('/api/quiz/syllabus-stats', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
+// --- NEW: DYNAMIC TOPIC FETCHING ---
+app.post('/api/quiz/get-topics', async (req, res) => {
+    try {
+        const { subject, chapters } = req.body;
+        
+        if (isDbConnected()) {
+            // Find distinct topics for the selected subject and chapters
+            const topicsData = await QuestionBank.aggregate([
+                { 
+                    $match: { 
+                        subject: subject,
+                        chapter: { $in: chapters }
+                    } 
+                },
+                { 
+                    $group: { 
+                        _id: { chapter: "$chapter", topic: "$topic" } 
+                    } 
+                },
+                {
+                    $group: {
+                        _id: "$_id.chapter",
+                        topics: { $push: "$_id.topic" }
+                    }
+                }
+            ]);
+
+            // Transform into a map: { "Chapter Name": ["Topic 1", "Topic 2"] }
+            const topicMap = {};
+            topicsData.forEach(item => {
+                topicMap[item._id] = item.topics.filter(t => t); // Filter nulls
+            });
+
+            res.json(topicMap);
+        } else {
+            // Fallback for memory mode (Scan memoryDb)
+            const topicMap = {};
+            memoryDb.questions.forEach(q => {
+                if (q.subject === subject && chapters.includes(q.chapter)) {
+                    if (!topicMap[q.chapter]) topicMap[q.chapter] = new Set();
+                    topicMap[q.chapter].add(q.topic);
+                }
+            });
+            // Convert Sets to Arrays
+            Object.keys(topicMap).forEach(k => {
+                topicMap[k] = Array.from(topicMap[k]);
+            });
+            res.json(topicMap);
+        }
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/quiz/generate-from-db', async (req, res) => {
     try {
         const { subject, chapter, topics, count } = req.body;
