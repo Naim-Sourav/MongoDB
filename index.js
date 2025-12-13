@@ -1014,6 +1014,36 @@ app.post('/api/battles/:roomId/answer', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
+// --- TEMP MIGRATION ROUTE ---
+app.post('/api/admin/fix-chapter-name', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            // Update Question Bank
+            const qResult = await QuestionBank.updateMany(
+                { chapter: 'মৌলের পর্যায়বৃত্ত ধর্ম ও রাসায়নি...' },
+                { $set: { chapter: 'মৌলের পর্যায়বৃত্ত ধর্ম ও রাসায়নিক বন্ধন' } }
+            );
+            
+            // Update Mistakes
+            const mResult = await Mistake.updateMany(
+                { chapter: 'মৌলের পর্যায়বৃত্ত ধর্ম ও রাসায়নি...' },
+                { $set: { chapter: 'মৌলের পর্যায়বৃত্ত ধর্ম ও রাসায়নিক বন্ধন' } }
+            );
+
+            return res.json({ 
+                success: true, 
+                questionsUpdated: qResult.modifiedCount,
+                mistakesUpdated: mResult.modifiedCount 
+            });
+        } else {
+            return res.status(400).json({ error: "Only available in MongoDB mode" });
+        }
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
