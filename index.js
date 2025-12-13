@@ -27,41 +27,8 @@ const memoryDb = {
   mistakes: [],
   examResults: [],
   questTemplates: [], // Admin templates
-  examPacks: [
-    {
-      id: 'med-final-24',
-      title: 'মেডিকেল ফাইনাল মডেল টেস্ট',
-      subtitle: 'শেষ মুহূর্তের পূর্ণাঙ্গ প্রস্তুতি (১০০টি মডেল টেস্ট)',
-      price: 500,
-      originalPrice: 1500,
-      totalExams: 100,
-      features: ['সম্পূর্ণ সিলেবাসের ওপর পরীক্ষা', 'নেগেটিভ মার্কিং প্র্যাকটিস', 'মেডিকেল স্ট্যান্ডার্ড প্রশ্ন', 'সলভ শিট ও ব্যাখ্যা'],
-      theme: 'emerald',
-      tag: 'Best Seller'
-    },
-    {
-      id: 'eng-qbank-solve',
-      title: 'ইঞ্জিনিয়ারিং প্রশ্ন ব্যাংক সলভ',
-      subtitle: 'বুয়েট, চুয়েট, কুয়েট, রুয়েট বিগত ২০ বছরের প্রশ্ন',
-      price: 750,
-      originalPrice: 2000,
-      totalExams: 50,
-      features: ['অধ্যায়ভিত্তিক এক্সাম', 'কঠিন প্রশ্নের সহজ সমাধান', 'শর্টকাট টেকনিক', 'আনলিমিটেড এটেম্পট'],
-      theme: 'blue',
-      tag: 'Premium'
-    },
-    {
-      id: 'varsity-ka-boost',
-      title: 'ভার্সিটি ক-ইউনিট বুস্টার',
-      subtitle: 'ঢাবি, জাবি, রাবি ও গুচ্ছ প্রস্তুতির সেরা প্যাক',
-      price: 450,
-      originalPrice: 1200,
-      totalExams: 60,
-      features: ['টাইম ম্যানেজমেন্ট প্র্যাকটিস', 'বিষয়ভিত্তিক মডেল টেস্ট', 'পূর্ণাঙ্গ মডেল টেস্ট', 'লাইভ লিডারবোর্ড'],
-      theme: 'orange',
-      tag: 'Popular'
-    }
-  ]
+  examPacks: [],
+  questionPapers: [] // NEW: Stores list of available question banks
 };
 
 // Connect to MongoDB
@@ -77,7 +44,6 @@ const isDbConnected = () => mongoose.connection.readyState === 1;
 
 // --- Schemas & Models (Mongoose) ---
 
-// Admin managed templates
 const questTemplateSchema = new mongoose.Schema({
   title: String,
   description: String,
@@ -91,7 +57,6 @@ const questTemplateSchema = new mongoose.Schema({
 });
 const QuestTemplate = mongoose.model('QuestTemplate', questTemplateSchema);
 
-// User specific progress
 const questSchema = new mongoose.Schema({
   id: String,
   title: String,
@@ -196,12 +161,23 @@ const questionBankSchema = new mongoose.Schema({
   correctAnswerIndex: { type: Number, required: true },
   explanation: String,
   difficulty: { type: String, default: 'MEDIUM' },
-  examRef: { type: String }, // NEW FIELD: To link questions to a specific exam paper ID
+  examRef: { type: String }, 
   createdAt: { type: Number, default: Date.now }
 });
 questionBankSchema.index({ subject: 1, chapter: 1, topic: 1 });
 questionBankSchema.index({ examRef: 1 });
 const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
+
+// NEW: Stores metadata about uploaded Question Banks (Papers)
+const questionPaperSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true }, // e.g. medical_23_24
+  title: { type: String, required: true },
+  year: { type: String, required: true },
+  source: { type: String, required: true }, // Medical, Engineering, etc.
+  totalQuestions: { type: Number, default: 0 },
+  time: { type: Number, default: 60 }
+});
+const QuestionPaper = mongoose.model('QuestionPaper', questionPaperSchema);
 
 const savedQuestionSchema = new mongoose.Schema({
   userId: { type: String, required: true },
@@ -260,531 +236,257 @@ app.get('/', (req, res) => {
   res.send(`🚀 Dhrubok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
 });
 
-// --- QUEST ROUTES ---
+// --- QUESTS ---
 
-const getQuestsFromPool = async (category, count) => {
-    let pool = [];
-    if (isDbConnected()) {
-        pool = await QuestTemplate.find({ category, isActive: true });
-    } else {
-        pool = memoryDb.questTemplates.filter(q => q.category === category && q.isActive);
-    }
-    if (pool.length === 0) {
-        // Defaults if DB is empty
-        const DEFAULT_QUESTS = [
-            { title: 'Exam Warrior', description: 'যেকোনো ১টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 1, reward: 25, icon: 'FileCheck', link: '/quiz', category: 'DAILY' },
-            { title: 'Knowledge Seeker', description: 'AI টিউটরকে ১টি প্রশ্ন করো', type: 'ASK_AI', target: 1, reward: 15, icon: 'Bot', link: 'SYNAPSE', category: 'DAILY' },
-            { title: 'Battle Ready', description: '১টি কুইজ ব্যাটল খেলো', type: 'PLAY_BATTLE', target: 1, reward: 50, icon: 'Swords', link: '/battle', category: 'DAILY' },
-            { title: 'Focus Master', description: '৩০ মিনিট পড়াশোনা করো', type: 'STUDY_TIME', target: 30, reward: 40, icon: 'Clock', link: '/tracker', category: 'DAILY' },
-            { title: 'Curious Mind', description: '১টি প্রশ্ন বুকমার্ক করো', type: 'SAVE_QUESTION', target: 1, reward: 10, icon: 'Bookmark', link: '/quiz', category: 'DAILY' },
-            { title: 'Consistency King', description: '৭ দিন টানা লগইন করো', type: 'LOGIN', target: 7, reward: 200, icon: 'Crown', category: 'WEEKLY' },
-            { title: 'Battle Champion', description: '৩টি কুইজ ব্যাটল জিতো', type: 'WIN_BATTLE', target: 3, reward: 150, icon: 'Trophy', link: '/battle', category: 'WEEKLY' },
-            { title: 'Marathon Runner', description: '৫টি কুইজ সম্পন্ন করো', type: 'EXAM_COMPLETE', target: 5, reward: 100, icon: 'Zap', link: '/quiz', category: 'WEEKLY' }
-        ];
-        pool = DEFAULT_QUESTS.filter(q => q.category === category);
-    }
-    return pool.sort(() => 0.5 - Math.random()).slice(0, count).map(q => ({
-        id: q._id ? q._id.toString() : Math.random().toString(),
-        title: q.title,
-        description: q.description,
-        type: q.type,
-        target: q.target,
-        progress: 0,
-        reward: q.reward,
-        completed: false,
-        claimed: false,
-        icon: q.icon,
-        link: q.link,
-        category: q.category
-    }));
-};
-
-app.post('/api/admin/quests', async (req, res) => {
-    try {
-        const questData = { ...req.body, isActive: true };
-        if (isDbConnected()) {
-            await new QuestTemplate(questData).save();
-        } else {
-            memoryDb.questTemplates.push({ ...questData, _id: Date.now().toString() });
-        }
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/admin/quests', async (req, res) => {
-    try {
-        if (isDbConnected()) {
-            const quests = await QuestTemplate.find();
-            res.json(quests);
-        } else {
-            res.json(memoryDb.questTemplates);
-        }
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/api/admin/quests/:id', async (req, res) => {
-    try {
-        if (isDbConnected()) {
-            await QuestTemplate.findByIdAndDelete(req.params.id);
-        } else {
-            memoryDb.questTemplates = memoryDb.questTemplates.filter(q => q._id !== req.params.id);
-        }
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// --- USERS & SYNC ---
-app.post('/api/users/sync', async (req, res) => {
-  try {
-    const { uid, email, displayName, photoURL, college, hscBatch, department, target, phoneNumber } = req.body;
-    const updateData = { uid, email, displayName, photoURL, lastLogin: Date.now(), college, hscBatch, department, target, phoneNumber };
-    // Remove undefined keys
-    Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
-
-    if (isDbConnected()) {
-      let user = await User.findOne({ uid });
-      const now = new Date();
-      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-      
-      // Weekly Reset Logic (Saturday Midnight)
-      const day = now.getDay();
-      const daysUntilSaturday = (6 - day + 7) % 7;
-      const nextSaturday = new Date(now);
-      nextSaturday.setDate(now.getDate() + (daysUntilSaturday === 0 ? 7 : daysUntilSaturday));
-      nextSaturday.setHours(0,0,0,0);
-      const nextWeeklyResetTime = nextSaturday.getTime();
-
-      let dailyQuestsToSet = null;
-      let weeklyQuestsToSet = null;
-
-      if (!user) {
-          dailyQuestsToSet = await getQuestsFromPool('DAILY', 5);
-          weeklyQuestsToSet = await getQuestsFromPool('WEEKLY', 3);
-          updateData.lastQuestReset = todayStart;
-          updateData.lastWeeklyQuestReset = nextWeeklyResetTime;
-      } else {
-          // Daily Reset
-          if (!user.lastQuestReset || user.lastQuestReset < todayStart) {
-              dailyQuestsToSet = await getQuestsFromPool('DAILY', 5);
-              updateData.lastQuestReset = todayStart;
-          }
-          // Weekly Reset
-          if (!user.lastWeeklyQuestReset || Date.now() > user.lastWeeklyQuestReset) {
-              weeklyQuestsToSet = await getQuestsFromPool('WEEKLY', 3);
-              updateData.lastWeeklyQuestReset = nextWeeklyResetTime;
-          }
-      }
-
-      if (dailyQuestsToSet) updateData.dailyQuests = dailyQuestsToSet;
-      if (weeklyQuestsToSet) updateData.weeklyQuests = weeklyQuestsToSet;
-
-      user = await User.findOneAndUpdate({ uid }, updateData, { upsert: true, new: true });
-      return res.json(user);
-    } else {
-      let user = memoryDb.users.find(u => u.uid === uid);
-      if (!user) { 
-          user = { 
-              ...updateData, 
-              points: 0, 
-              stats: { totalCorrect: 0, totalWrong: 0, totalSkipped: 0, subjectStats: {}, topicStats: {} }, 
-              dailyQuests: await getQuestsFromPool('DAILY', 5),
-              weeklyQuests: await getQuestsFromPool('WEEKLY', 3)
-          }; 
-          memoryDb.users.push(user); 
-      } else {
-          Object.assign(user, updateData);
-      }
-      return res.json(user);
-    }
-  } catch (e) { res.status(500).json({error: 'Sync failed'}); }
-});
-
-// --- QUEST UPDATES ---
 app.post('/api/quests/update', async (req, res) => {
     try {
-        const { userId, actionType, value } = req.body; 
-        if (isDbConnected()) {
-            const user = await User.findOne({ uid: userId });
-            if (!user) return res.status(404).json({ error: 'User not found' });
-            
-            let updated = false;
-            
-            // Update Daily
-            if (user.dailyQuests) {
-                user.dailyQuests = user.dailyQuests.map(q => {
-                    if (q.type === actionType && !q.completed) {
-                        q.progress += value;
-                        if (q.progress >= q.target) {
-                            q.progress = q.target;
-                            q.completed = true;
-                        }
-                        updated = true;
-                    }
-                    return q;
-                });
-            }
+        const { userId, actionType, value } = req.body;
+        if (!isDbConnected()) return res.json({ success: true }); // Mock success
 
-            // Update Weekly
-            if (user.weeklyQuests) {
-                user.weeklyQuests = user.weeklyQuests.map(q => {
-                    if (q.type === actionType && !q.completed) {
-                        q.progress += value;
-                        if (q.progress >= q.target) {
-                            q.progress = q.target;
-                            q.completed = true;
-                        }
-                        updated = true;
-                    }
-                    return q;
-                });
-            }
+        const user = await User.findOne({ uid: userId });
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
-            if (updated) await user.save();
-            res.json({ success: true, quests: user.dailyQuests, weeklyQuests: user.weeklyQuests });
-        } else { res.json({ success: true }); }
-    } catch(e) { res.status(500).json({ error: 'Quest update failed' }); }
+        let updated = false;
+        
+        // Helper to update quest list
+        const processQuests = (questList) => {
+            questList.forEach(quest => {
+                if (quest.type === actionType && !quest.completed) {
+                    quest.progress = Math.min(quest.target, quest.progress + value);
+                    if (quest.progress >= quest.target) {
+                        quest.completed = true;
+                    }
+                    updated = true;
+                }
+            });
+        };
+
+        processQuests(user.dailyQuests);
+        processQuests(user.weeklyQuests);
+
+        if (updated) await user.save();
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post('/api/quests/claim', async (req, res) => {
     try {
-        const { userId, questId, category } = req.body; 
-        if(isDbConnected()) {
-            const user = await User.findOne({ uid: userId });
-            let quest;
-            
-            if (category === 'WEEKLY') {
-                quest = user.weeklyQuests.find(q => q.id === questId);
-            } else {
-                quest = user.dailyQuests.find(q => q.id === questId);
-            }
+        const { userId, questId, category } = req.body;
+        if (!isDbConnected()) return res.json({ success: true, points: 1250 + 50 });
 
-            if (quest && quest.completed && !quest.claimed) {
-                quest.claimed = true;
-                user.points += quest.reward;
-                await user.save();
-                res.json({ success: true, points: user.points, quests: user.dailyQuests, weeklyQuests: user.weeklyQuests });
-            } else {
-                res.status(400).json({ error: 'Cannot claim' });
-            }
-        } else { res.json({ success: true, points: 100 }); }
-    } catch(e) { res.status(500).json({ error: 'Claim failed' }); }
-});
+        const user = await User.findOne({ uid: userId });
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
-// --- ADMIN & STATS ---
-app.get('/api/admin/stats', async (req, res) => {
-  try {
-    const stats = { totalUsers: 0, totalRevenue: 0, totalQuestions: 0, totalExams: 0, pendingPayments: 0, approvedEnrollments: 0 };
-    if (isDbConnected()) {
-        stats.totalUsers = await User.countDocuments();
-        stats.totalQuestions = await QuestionBank.countDocuments();
-        stats.totalExams = await ExamResult.countDocuments();
-        stats.pendingPayments = await Payment.countDocuments({ status: 'PENDING' });
-        stats.approvedEnrollments = await Payment.countDocuments({ status: 'APPROVED' });
-        const revenueAgg = await Payment.aggregate([{ $match: { status: 'APPROVED' } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
-        stats.totalRevenue = revenueAgg[0]?.total || 0;
-    } else {
-        stats.totalUsers = memoryDb.users.length;
-        stats.totalQuestions = memoryDb.questions.length;
-        stats.totalExams = memoryDb.examResults.length;
-        stats.pendingPayments = memoryDb.payments.filter(p => p.status === 'PENDING').length;
-        stats.approvedEnrollments = memoryDb.payments.filter(p => p.status === 'APPROVED').length;
-        stats.totalRevenue = memoryDb.payments.filter(p => p.status === 'APPROVED').reduce((sum, p) => sum + (p.amount || 0), 0);
+        const list = category === 'WEEKLY' ? user.weeklyQuests : user.dailyQuests;
+        const quest = list.find(q => q.id === questId);
+
+        if (quest && quest.completed && !quest.claimed) {
+            quest.claimed = true;
+            user.points += quest.reward;
+            await user.save();
+            res.json({ success: true, points: user.points });
+        } else {
+            res.status(400).json({ error: 'Quest not eligible' });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
-    res.json(stats);
-  } catch (e) { res.status(500).json({ error: 'Stats failed' }); }
 });
 
-// --- PAYMENTS ---
-app.get('/api/admin/payments', async (req, res) => {
-    try {
-        if(isDbConnected()) {
-            const payments = await Payment.find().sort({ timestamp: -1 });
-            const formattedPayments = payments.map(p => {
-                const obj = p.toObject();
-                return { ...obj, id: obj._id.toString() };
-            });
-            res.json(formattedPayments);
-        } else { res.json(memoryDb.payments); }
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
+// --- USERS ---
 
-app.post('/api/payments', async (req, res) => {
+app.post('/api/users/sync', async (req, res) => {
     try {
-        const data = { ...req.body, status: 'PENDING', timestamp: Date.now() };
-        if(isDbConnected()) {
-            await new Payment(data).save();
+        const userData = req.body;
+        if (isDbConnected()) {
+            await User.findOneAndUpdate(
+                { uid: userData.uid },
+                { $set: userData, $setOnInsert: { createdAt: Date.now() } },
+                { upsert: true, new: true }
+            );
         } else {
-            memoryDb.payments.push({ ...data, id: Date.now().toString() });
+            const idx = memoryDb.users.findIndex(u => u.uid === userData.uid);
+            if (idx >= 0) memoryDb.users[idx] = { ...memoryDb.users[idx], ...userData };
+            else memoryDb.users.push(userData);
         }
         res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.put('/api/admin/payments/:id', async (req, res) => {
-    try {
-        const { status } = req.body;
-        if(isDbConnected()) {
-            await Payment.findByIdAndUpdate(req.params.id, { status });
-        } else {
-            const p = memoryDb.payments.find(x => x.id === req.params.id);
-            if(p) p.status = status;
-        }
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.delete('/api/admin/payments/:id', async (req, res) => {
-    try {
-        if(isDbConnected()) {
-            await Payment.findByIdAndDelete(req.params.id);
-        } else {
-            memoryDb.payments = memoryDb.payments.filter(x => x.id !== req.params.id);
-        }
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-// --- NOTIFICATIONS ---
-app.get('/api/notifications', async (req, res) => {
-    try {
-        if(isDbConnected()) {
-            const notifs = await Notification.find().sort({ date: -1 });
-            const formattedNotifs = notifs.map(n => {
-                const obj = n.toObject();
-                return { ...obj, id: obj._id.toString() };
-            });
-            res.json(formattedNotifs);
-        } else { res.json(memoryDb.notifications); }
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.post('/api/admin/notifications', async (req, res) => {
-    try {
-        const data = { ...req.body, date: Date.now() };
-        if(isDbConnected()) {
-            await new Notification(data).save();
-        } else {
-            memoryDb.notifications.unshift({ ...data, _id: Date.now().toString() });
-        }
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-// --- LEADERBOARD ---
-app.get('/api/leaderboard', async (req, res) => {
-    try {
-        if(isDbConnected()) {
-            const users = await User.find().sort({ points: -1 }).limit(50).select('uid displayName photoURL points college hscBatch target department');
-            res.json(users);
-        } else {
-            res.json(memoryDb.users.sort((a,b) => b.points - a.points).slice(0, 50));
-        }
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-// --- EXAM PACKS ---
-app.get('/api/exam-packs', async (req, res) => {
-    try {
-        if(isDbConnected()) {
-            const packs = await ExamPack.find();
-            res.json(packs.length ? packs : memoryDb.examPacks);
-        } else { res.json(memoryDb.examPacks); }
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-// --- USER DATA ---
-app.get('/api/users/:userId/enrollments', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    if (isDbConnected()) {
-        const payments = await Payment.find({ userId, status: 'APPROVED' });
-        res.json(payments.map(p => ({ id: p.courseId, title: p.courseTitle, progress: 0 })));
-    } else {
-        const payments = memoryDb.payments.filter(p => p.userId === userId && p.status === 'APPROVED');
-        res.json(payments.map(p => ({ id: p.courseId, title: p.courseTitle, progress: 0 })));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
-  } catch (e) { res.status(500).json({ error: 'Fetch enrollments failed' }); }
 });
 
 app.get('/api/users/:userId/stats', async (req, res) => {
-    const { userId } = req.params;
     try {
-        let user;
         if (isDbConnected()) {
-            user = await User.findOne({ uid: userId });
+            const user = await User.findOne({ uid: req.params.userId });
+            res.json(user ? { 
+                points: user.points, 
+                totalExams: user.totalExams,
+                totalCorrect: user.stats.totalCorrect,
+                totalWrong: user.stats.totalWrong,
+                subjectBreakdown: Array.from(user.stats.subjectStats.entries()).map(([k,v]) => ({ 
+                    subject: k, 
+                    accuracy: v.total > 0 ? (v.correct/v.total)*100 : 0 
+                })),
+                strongestTopics: Array.from(user.stats.topicStats.entries())
+                    .map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 }))
+                    .sort((a,b) => b.accuracy - a.accuracy).slice(0, 3),
+                weakestTopics: Array.from(user.stats.topicStats.entries())
+                    .map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 }))
+                    .sort((a,b) => a.accuracy - b.accuracy).slice(0, 3),
+                quests: user.dailyQuests,
+                weeklyQuests: user.weeklyQuests,
+                user: user // Return full user object for profile info
+            } : {});
         } else {
-            user = memoryDb.users.find(u => u.uid === userId);
+            res.json({ points: 1250, totalExams: 15 });
         }
-        if (!user) return res.json({ points: 0, totalExams: 0 });
-
-        const subjStatsObj = user.stats?.subjectStats instanceof Map ? Object.fromEntries(user.stats.subjectStats) : (user.stats?.subjectStats || {});
-        const topicStatsObj = user.stats?.topicStats instanceof Map ? Object.fromEntries(user.stats.topicStats) : (user.stats?.topicStats || {});
-
-        const subjectBreakdown = Object.keys(subjStatsObj).map(s => ({
-            subject: s, accuracy: (subjStatsObj[s].correct / subjStatsObj[s].total) * 100
-        })).sort((a,b) => b.accuracy - a.accuracy);
-
-        const topicBreakdown = Object.keys(topicStatsObj).map(t => ({
-            topic: t, accuracy: (topicStatsObj[t].correct / topicStatsObj[t].total) * 100, total: topicStatsObj[t].total
-        })).sort((a,b) => b.accuracy - a.accuracy);
-
-        res.json({
-            user: { displayName: user.displayName, photoURL: user.photoURL, college: user.college, hscBatch: user.hscBatch, department: user.department, target: user.target, points: user.points, phoneNumber: user.phoneNumber },
-            points: user.points,
-            totalExams: user.totalExams,
-            totalCorrect: user.stats?.totalCorrect || 0,
-            totalWrong: user.stats?.totalWrong || 0,
-            subjectBreakdown,
-            strongestTopics: topicBreakdown.slice(0, 5),
-            weakestTopics: topicBreakdown.slice().reverse().slice(0, 5),
-            quests: user.dailyQuests || [],
-            weeklyQuests: user.weeklyQuests || []
-        });
-    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/users/:userId/exam-results', async (req, res) => {
     try {
         const { userId } = req.params;
-        const { mistakes, ...resultData } = req.body; 
-        const examResultData = { userId, ...resultData, timestamp: Date.now() };
-        
+        const resultData = req.body;
+
         if (isDbConnected()) {
-            await new ExamResult(examResultData).save();
-            
-            // Save mistakes
-            if (mistakes && mistakes.length > 0) {
-                const bulkOps = mistakes.map(m => ({
-                    updateOne: {
-                        filter: { userId, question: m.question }, 
-                        update: { $set: { ...m, userId, lastMissed: Date.now() }, $inc: { wrongCount: 1 } },
-                        upsert: true
-                    }
-                }));
-                await Mistake.bulkWrite(bulkOps);
-            }
+            // Save Result Log
+            await ExamResult.create({ userId, ...resultData });
 
             // Update User Stats
             const user = await User.findOne({ uid: userId });
             if (user) {
-                if (!user.stats) user.stats = { totalCorrect:0, totalWrong:0, totalSkipped:0, subjectStats: {}, topicStats: {} };
-                user.points = (user.points || 0) + (resultData.correct * 5) + 10; 
-                user.totalExams = (user.totalExams || 0) + 1;
-                user.stats.totalCorrect = (user.stats.totalCorrect || 0) + resultData.correct;
-                user.stats.totalWrong = (user.stats.totalWrong || 0) + resultData.wrong;
-                
-                const subj = resultData.subject;
-                const currentSubjStat = user.stats.subjectStats.get(subj) || { correct: 0, total: 0 };
-                user.stats.subjectStats.set(subj, { correct: currentSubjStat.correct + resultData.correct, total: currentSubjStat.total + resultData.totalQuestions });
+                user.totalExams += 1;
+                user.points += (resultData.score > 0 ? (resultData.correct * 5) + 10 : 0);
+                user.stats.totalCorrect += resultData.correct;
+                user.stats.totalWrong += resultData.wrong;
+                user.stats.totalSkipped += resultData.skipped;
 
-                if (resultData.topicStats && Array.isArray(resultData.topicStats)) {
-                    resultData.topicStats.forEach(ts => {
-                        const currentTopicStat = user.stats.topicStats.get(ts.topic) || { correct: 0, total: 0 };
-                        user.stats.topicStats.set(ts.topic, { correct: currentTopicStat.correct + ts.correct, total: currentTopicStat.total + ts.total });
-                    });
-                }
+                // Update Subject Stats
+                const subjStat = user.stats.subjectStats.get(resultData.subject) || { correct: 0, total: 0 };
+                subjStat.correct += resultData.correct;
+                subjStat.total += resultData.totalQuestions; // Assuming all Qs belong to this subject for simple exams
+                user.stats.subjectStats.set(resultData.subject, subjStat);
+
+                // Update Topic Stats
+                resultData.topicStats.forEach(t => {
+                    const topicStat = user.stats.topicStats.get(t.topic) || { correct: 0, total: 0 };
+                    topicStat.correct += t.correct;
+                    topicStat.total += t.total;
+                    user.stats.topicStats.set(t.topic, topicStat);
+                });
+
                 await user.save();
             }
-        } else {
-            memoryDb.examResults.push(examResultData);
-            if (mistakes) mistakes.forEach(m => memoryDb.mistakes.push({ ...m, userId, _id: Date.now() }));
+
+            // Save Mistakes
+            if (resultData.mistakes && resultData.mistakes.length > 0) {
+                for (const m of resultData.mistakes) {
+                    await Mistake.findOneAndUpdate(
+                        { userId, question: m.question }, // Simple dedup by question text
+                        { 
+                            $setOnInsert: { 
+                                options: m.options, 
+                                correctAnswerIndex: m.correctAnswerIndex,
+                                explanation: m.explanation,
+                                subject: m.subject,
+                                chapter: m.chapter,
+                                topic: m.topic
+                            },
+                            $inc: { wrongCount: 1 },
+                            $set: { lastMissed: Date.now() }
+                        },
+                        { upsert: true }
+                    );
+                }
+            }
         }
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Failed' }); }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- SAVED QUESTIONS ---
-app.post('/api/users/:userId/saved-questions', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const { questionId, folder = 'General' } = req.body;
-        if(isDbConnected()) {
-            await new SavedQuestion({ userId, questionId, folder }).save();
-        } else {
-            memoryDb.savedQuestions.push({ userId, questionId, folder, _id: Date.now().toString() });
-        }
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
 
 app.get('/api/users/:userId/saved-questions', async (req, res) => {
     try {
-        const { userId } = req.params;
-        if(isDbConnected()) {
-            const saved = await SavedQuestion.find({ userId }).populate('questionId');
-            res.json(saved);
+        if (isDbConnected()) {
+            const saved = await SavedQuestion.find({ userId: req.params.userId }).populate('questionId');
+            res.json(saved.filter(s => s.questionId)); // Filter out null populated questions
         } else {
-            // Mock population for memory mode
-            const saved = memoryDb.savedQuestions.filter(s => s.userId === userId).map(s => {
-                const q = memoryDb.questions.find(mq => mq._id === s.questionId);
-                return { ...s, questionId: q };
-            });
-            res.json(saved);
+            res.json(memoryDb.savedQuestions.filter(s => s.userId === req.params.userId));
         }
-    } catch(e) { res.status(500).json({error: e.message}); }
+    } catch (e) { res.status(500).json({error: e.message}); }
 });
 
-app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
+app.post('/api/users/:userId/saved-questions', async (req, res) => {
     try {
-        if(isDbConnected()) {
-            await SavedQuestion.findByIdAndDelete(req.params.id);
+        const { questionId, folder } = req.body;
+        if (isDbConnected()) {
+            await SavedQuestion.create({ userId: req.params.userId, questionId, folder });
         } else {
-            memoryDb.savedQuestions = memoryDb.savedQuestions.filter(s => s._id !== req.params.id);
+            memoryDb.savedQuestions.push({ _id: Date.now(), userId: req.params.userId, questionId, folder });
         }
         res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.delete('/api/users/:userId/saved-questions/by-q/:questionId', async (req, res) => {
-    try {
-        const { userId, questionId } = req.params;
-        if(isDbConnected()) {
-            await SavedQuestion.findOneAndDelete({ userId, questionId });
-        } else {
-            memoryDb.savedQuestions = memoryDb.savedQuestions.filter(s => s.questionId !== questionId || s.userId !== userId);
-        }
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
+    } catch (e) { res.status(500).json({error: e.message}); }
 });
 
 app.patch('/api/users/:userId/saved-questions/:id', async (req, res) => {
     try {
         const { folder } = req.body;
-        if(isDbConnected()) {
+        if (isDbConnected()) {
             await SavedQuestion.findByIdAndUpdate(req.params.id, { folder });
-        } else {
-            const s = memoryDb.savedQuestions.find(x => x._id === req.params.id);
-            if(s) s.folder = folder;
         }
         res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            await SavedQuestion.findByIdAndDelete(req.params.id);
+        } else {
+            memoryDb.savedQuestions = memoryDb.savedQuestions.filter(s => s._id.toString() !== req.params.id);
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+app.delete('/api/users/:userId/saved-questions/by-q/:questionId', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            await SavedQuestion.findOneAndDelete({ userId: req.params.userId, questionId: req.params.questionId });
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({error: e.message}); }
 });
 
 // --- MISTAKES ---
+
 app.get('/api/users/:userId/mistakes', async (req, res) => {
     try {
-        const { userId } = req.params;
-        if(isDbConnected()) {
-            const mistakes = await Mistake.find({ userId }).sort({ lastMissed: -1 });
+        if (isDbConnected()) {
+            const mistakes = await Mistake.find({ userId: req.params.userId }).sort({ lastMissed: -1 });
             res.json(mistakes);
         } else {
-            res.json(memoryDb.mistakes.filter(m => m.userId === userId));
+            res.json(memoryDb.mistakes.filter(m => m.userId === req.params.userId));
         }
-    } catch(e) { res.status(500).json({error: e.message}); }
+    } catch (e) { res.status(500).json({error: e.message}); }
 });
 
 app.delete('/api/users/:userId/mistakes/:id', async (req, res) => {
     try {
-        if(isDbConnected()) {
+        if (isDbConnected()) {
             await Mistake.findByIdAndDelete(req.params.id);
-        } else {
-            memoryDb.mistakes = memoryDb.mistakes.filter(m => m._id !== req.params.id);
         }
         res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
+    } catch (e) { res.status(500).json({error: e.message}); }
 });
 
 // --- QUESTION BANK ADMIN ---
+
+// GET: All Questions (Admin Viewer)
 app.get('/api/admin/questions', async (req, res) => {
     try {
         const { page = 1, limit = 10, subject, chapter } = req.query;
@@ -803,12 +505,53 @@ app.get('/api/admin/questions', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
+// POST: Bulk Upload + Paper Metadata
 app.post('/api/admin/questions/bulk', async (req, res) => {
     try {
-        const { questions } = req.body;
-        if(isDbConnected()) await QuestionBank.insertMany(questions);
-        else questions.forEach(q => memoryDb.questions.push({...q, _id: Date.now() + Math.random()}));
+        const { questions, metadata } = req.body;
+        
+        if(isDbConnected()) {
+            // 1. Insert Questions
+            await QuestionBank.insertMany(questions);
+            
+            // 2. Insert/Update Paper Metadata if provided
+            if (metadata) {
+                await QuestionPaper.findOneAndUpdate(
+                    { id: metadata.id },
+                    metadata,
+                    { upsert: true, new: true }
+                );
+            }
+        } else {
+            questions.forEach(q => memoryDb.questions.push({...q, _id: Date.now() + Math.random()}));
+            if (metadata) {
+                const existingIdx = memoryDb.questionPapers.findIndex(p => p.id === metadata.id);
+                if (existingIdx >= 0) memoryDb.questionPapers[existingIdx] = metadata;
+                else memoryDb.questionPapers.push(metadata);
+            }
+        }
         res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.delete('/api/admin/questions/:id', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            await QuestionBank.findByIdAndDelete(req.params.id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// GET: List of Available Question Papers
+app.get('/api/question-papers', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const papers = await QuestionPaper.find().sort({ year: -1 });
+            res.json(papers);
+        } else {
+            res.json(memoryDb.questionPapers);
+        }
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
@@ -828,57 +571,218 @@ app.get('/api/quiz/past-paper/:examRef', async (req, res) => {
     }
 });
 
-app.delete('/api/admin/questions/:id', async (req, res) => {
-    try {
-        if(isDbConnected()) await QuestionBank.findByIdAndDelete(req.params.id);
-        else memoryDb.questions = memoryDb.questions.filter(q => q._id !== req.params.id);
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
+// --- QUIZ GENERATION FROM DB ---
 
 app.post('/api/quiz/generate-from-db', async (req, res) => {
     try {
         const { subject, chapter, topics, count } = req.body;
-        const query = { subject, chapter };
-        if(topics && topics.length > 0) query.topic = { $in: topics };
-
-        if(isDbConnected()) {
-            // Random sampling using aggregate
-            const questions = await QuestionBank.aggregate([
-                { $match: query },
+        
+        if (isDbConnected()) {
+            // Complex aggregation to get random questions matching criteria
+            const pipeline = [
+                { $match: { 
+                    subject, 
+                    chapter: chapter === 'Full Syllabus' ? { $exists: true } : chapter,
+                    ...(topics && topics.length > 0 && topics[0] !== 'Full Syllabus' ? { topic: { $in: topics } } : {})
+                }},
                 { $sample: { size: count } }
-            ]);
+            ];
+            const questions = await QuestionBank.aggregate(pipeline);
             res.json(questions);
         } else {
-            const qs = memoryDb.questions.filter(q => q.subject === subject && q.chapter === chapter && (!topics || topics.includes(q.topic)));
-            res.json(qs.sort(() => 0.5 - Math.random()).slice(0, count));
+            const filtered = memoryDb.questions.filter(q => 
+                q.subject === subject && 
+                (chapter === 'Full Syllabus' || q.chapter === chapter)
+            );
+            // Shuffle
+            const shuffled = filtered.sort(() => 0.5 - Math.random()).slice(0, count);
+            res.json(shuffled);
         }
-    } catch(e) { res.status(500).json({error: e.message}); }
+    } catch (e) { res.status(500).json({error: e.message}); }
 });
 
 app.get('/api/quiz/syllabus-stats', async (req, res) => {
     try {
-        if(isDbConnected()) {
-            const stats = await QuestionBank.aggregate([
-                { $group: {
+        if (!isDbConnected()) return res.json({});
+
+        // Aggregation to count questions per Subject -> Chapter -> Topic
+        const stats = await QuestionBank.aggregate([
+            {
+                $group: {
                     _id: { subject: "$subject", chapter: "$chapter", topic: "$topic" },
                     count: { $sum: 1 }
-                }}
-            ]);
-            // Transform to nested structure
-            const result = {};
-            stats.forEach(item => {
-                const { subject, chapter, topic } = item._id;
-                if(!result[subject]) result[subject] = { total: 0, chapters: {} };
-                if(!result[subject].chapters[chapter]) result[subject].chapters[chapter] = { total: 0, topics: {} };
-                
-                result[subject].chapters[chapter].topics[topic] = item.count;
-                result[subject].chapters[chapter].total += item.count;
-                result[subject].total += item.count;
-            });
-            res.json(result);
-        } else { res.json({}); }
+                }
+            },
+            {
+                $group: {
+                    _id: { subject: "$_id.subject", chapter: "$_id.chapter" },
+                    topics: { $push: { k: "$_id.topic", v: "$count" } },
+                    totalChapter: { $sum: "$count" }
+                }
+            },
+            {
+                $group: {
+                    _id: "$_id.subject",
+                    chapters: { 
+                        $push: { 
+                            k: "$_id.chapter", 
+                            v: { total: "$totalChapter", topics: { $arrayToObject: "$topics" } } 
+                        } 
+                    },
+                    totalSubject: { $sum: "$totalChapter" }
+                }
+            }
+        ]);
+
+        // Transform to cleaner JSON structure
+        const formatted = {};
+        stats.forEach(s => {
+            const chaptersObj = {};
+            s.chapters.forEach(c => chaptersObj[c.k] = c.v);
+            formatted[s._id] = {
+                total: s.totalSubject,
+                chapters: chaptersObj
+            };
+        });
+
+        res.json(formatted);
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+// --- PAYMENTS & ADMIN ---
+
+app.get('/api/admin/payments', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            const payments = await Payment.find().sort({ timestamp: -1 });
+            res.json(payments);
+        } else {
+            res.json(memoryDb.payments);
+        }
     } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.post('/api/payments', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            await Payment.create(req.body);
+        } else {
+            memoryDb.payments.push({ ...req.body, id: Date.now().toString(), status: 'PENDING', timestamp: Date.now() });
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.put('/api/admin/payments/:id', async (req, res) => {
+    try {
+        const { status } = req.body;
+        if(isDbConnected()) {
+            await Payment.findByIdAndUpdate(req.params.id, { status });
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.delete('/api/admin/payments/:id', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            await Payment.findByIdAndDelete(req.params.id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/admin/stats', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            const totalRevenue = await Payment.aggregate([
+                { $match: { status: 'APPROVED' } },
+                { $group: { _id: null, total: { $sum: "$amount" } } }
+            ]);
+            const approvedEnrollments = await Payment.countDocuments({ status: 'APPROVED' });
+            const pendingPayments = await Payment.countDocuments({ status: 'PENDING' });
+            const totalUsers = await User.countDocuments();
+            const totalQuestions = await QuestionBank.countDocuments();
+            
+            // Calculate total exams taken from User stats
+            const totalExamsAgg = await User.aggregate([{ $group: { _id: null, total: { $sum: "$totalExams" } } }]);
+
+            res.json({
+                totalRevenue: totalRevenue[0]?.total || 0,
+                approvedEnrollments,
+                pendingPayments,
+                totalUsers,
+                totalQuestions,
+                totalExams: totalExamsAgg[0]?.total || 0
+            });
+        } else {
+            res.json({ totalRevenue: 0, approvedEnrollments: 0, pendingPayments: 0, totalUsers: 0, totalQuestions: 0, totalExams: 0 });
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// --- LEADERBOARD ---
+
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            const users = await User.find({}, 'uid displayName photoURL points college hscBatch target department').sort({ points: -1 }).limit(100);
+            res.json(users);
+        } else {
+            res.json([
+                { uid: '1', displayName: 'Tahmid', points: 5000 },
+                { uid: '2', displayName: 'Rafiq', points: 4500 }
+            ]);
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// --- NOTIFICATIONS ---
+
+app.get('/api/notifications', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            const notifs = await Notification.find().sort({ date: -1 }).limit(50);
+            res.json(notifs);
+        } else {
+            res.json(memoryDb.notifications);
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.post('/api/admin/notifications', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            await Notification.create(req.body);
+        } else {
+            memoryDb.notifications.push({ ...req.body, _id: Date.now().toString(), date: Date.now() });
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// --- EXAM PACKS ---
+// (Currently using static mock, but ready for DB)
+app.get('/api/exam-packs', async (req, res) => {
+    if(isDbConnected()) {
+        const packs = await ExamPack.find();
+        if (packs.length > 0) return res.json(packs);
+    }
+    // Fallback Mock
+    res.json([
+        {
+          id: 'med-final-24',
+          title: 'মেডিকেল ফাইনাল মডেল টেস্ট',
+          subtitle: 'শেষ মুহূর্তের পূর্ণাঙ্গ প্রস্তুতি (১০০টি মডেল টেস্ট)',
+          price: 500,
+          originalPrice: 1500,
+          totalExams: 100,
+          features: ['সম্পূর্ণ সিলেবাসের ওপর পরীক্ষা', 'নেগেটিভ মার্কিং প্র্যাকটিস', 'মেডিকেল স্ট্যান্ডার্ড প্রশ্ন', 'সলভ শিট ও ব্যাখ্যা'],
+          theme: 'emerald',
+          tag: 'Best Seller'
+        },
+        // ... other mocks
+    ]);
 });
 
 const PORT = process.env.PORT || 5000;
