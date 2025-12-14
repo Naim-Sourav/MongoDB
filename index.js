@@ -1,640 +1,791 @@
 
-require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 
 // Middleware
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
-app.use(express.json());
 
-// --- MONGODB CONNECTION ---
-// Replace with your actual connection string in .env file as MONGODB_URI
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/dhrubok_db";
+// --- MongoDB Connection Setup ---
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://user:pass@cluster0.mongodb.net/shikkha-shohayok?retryWrites=true&w=majority';
 
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('MongoDB Connected'))
-  .catch(err => console.log('MongoDB Connection Error:', err));
+// In-Memory Fallback Storage
+const memoryDb = {
+  users: [],
+  payments: [],
+  notifications: [
+    { _id: '1', title: 'System', message: 'Running in fallback mode (Database disconnected)', type: 'WARNING', date: Date.now() }
+  ],
+  battles: [],
+  questions: [],
+  savedQuestions: [],
+  mistakes: [],
+  examResults: [],
+  questTemplates: [], // Admin templates
+  examPacks: [],
+  questionPapers: [] // NEW: Stores list of available question banks
+};
 
+// Connect to MongoDB
+mongoose.connect(MONGODB_URI, {
+  serverSelectionTimeoutMS: 5000, 
+  socketTimeoutMS: 45000,
+})
+  .then(() => console.log('✅ Connected to MongoDB Atlas'))
+  .catch(err => console.error('⚠️ MongoDB Connection Failed. Switching to In-Memory Fallback mode.'));
+
+// Helper to check DB status
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
-// --- SCHEMAS & MODELS ---
+// --- Schemas & Models (Mongoose) ---
 
-const UserSchema = new mongoose.Schema({
+const questTemplateSchema = new mongoose.Schema({
+  title: String,
+  description: String,
+  type: String, 
+  target: Number,
+  reward: Number,
+  icon: String,
+  link: String,
+  category: { type: String, enum: ['DAILY', 'WEEKLY'], default: 'DAILY' },
+  isActive: { type: Boolean, default: true }
+});
+const QuestTemplate = mongoose.model('QuestTemplate', questTemplateSchema);
+
+const questSchema = new mongoose.Schema({
+  id: String,
+  title: String,
+  description: String,
+  type: String,
+  target: Number,
+  progress: { type: Number, default: 0 },
+  reward: Number,
+  completed: { type: Boolean, default: false },
+  claimed: { type: Boolean, default: false },
+  icon: String,
+  link: String,
+  category: String
+}, { _id: false });
+
+const userSchema = new mongoose.Schema({
   uid: { type: String, required: true, unique: true },
-  displayName: String,
   email: String,
+  displayName: String,
   photoURL: String,
-  phoneNumber: String,
+  role: { type: String, default: 'student' },
   college: String,
   hscBatch: String,
   department: String,
   target: String,
   points: { type: Number, default: 0 },
-  role: { type: String, default: 'student' }, // 'student', 'admin'
-  
-  // Progress Stats
   totalExams: { type: Number, default: 0 },
-  totalCorrect: { type: Number, default: 0 },
-  totalWrong: { type: Number, default: 0 },
-  
-  // Game Data
-  quests: [{
-    id: String,
-    title: String,
-    description: String,
-    type: String,
-    target: Number,
-    progress: Number,
-    reward: Number,
-    completed: Boolean,
-    claimed: Boolean,
-    icon: String,
-    category: String,
-    lastUpdated: Number
-  }],
-  
-  // Enrollments
-  enrolledCourses: [{
-    id: String,
-    title: String,
-    progress: Number,
-    enrolledAt: Number
-  }],
+  lastLogin: { type: Number, default: Date.now },
+  createdAt: { type: Number, default: Date.now },
+  stats: {
+    totalCorrect: { type: Number, default: 0 },
+    totalWrong: { type: Number, default: 0 },
+    totalSkipped: { type: Number, default: 0 },
+    subjectStats: { type: Map, of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), default: {} },
+    topicStats: { type: Map, of: new mongoose.Schema({ correct: Number, total: Number }, { _id: false }), default: {} }
+  },
+  dailyQuests: [questSchema],
+  weeklyQuests: [questSchema],
+  lastQuestReset: { type: Number, default: 0 },
+  lastWeeklyQuestReset: { type: Number, default: 0 }
+});
+const User = mongoose.model('User', userSchema);
 
-  // Saved Content
-  savedQuestions: [{
-    questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'QuestionBank' },
-    folder: { type: String, default: 'All' },
-    savedAt: { type: Number, default: Date.now }
-  }],
-
-  // Mistakes Log
-  mistakes: [{
-    questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'QuestionBank' },
-    wrongCount: { type: Number, default: 1 },
-    lastMissed: { type: Number, default: Date.now }
-  }]
-}, { timestamps: true });
-
-const QuestionBankSchema = new mongoose.Schema({
-  question: String,
-  options: [String],
-  correctAnswerIndex: Number,
-  explanation: String,
-  subject: String,
-  chapter: String,
-  topic: String,
-  difficulty: String, // EASY, MEDIUM, HARD
-  examRef: String,    // e.g. 'medical_2023'
-}, { timestamps: true });
-
-const PaymentSchema = new mongoose.Schema({
-  userId: String,
+const paymentSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
   userName: String,
   userEmail: String,
   courseId: String,
   courseTitle: String,
   amount: Number,
-  trxId: String,
-  senderNumber: String,
-  status: { type: String, default: 'PENDING' }, // PENDING, APPROVED, REJECTED
+  trxId: { type: String, required: true },
+  senderNumber: { type: String, required: true },
+  status: { type: String, default: 'PENDING', enum: ['PENDING', 'APPROVED', 'REJECTED'] },
   timestamp: { type: Number, default: Date.now }
 });
+const Payment = mongoose.model('Payment', paymentSchema);
 
-const NotificationSchema = new mongoose.Schema({
+const notificationSchema = new mongoose.Schema({
   title: String,
   message: String,
-  type: String, // INFO, SUCCESS, WARNING
-  target: { type: String, default: 'ALL' }, // 'ALL' or specific UID
-  date: { type: Number, default: Date.now }
+  type: { type: String, enum: ['INFO', 'WARNING', 'SUCCESS', 'BATTLE_CHALLENGE', 'BATTLE_RESULT'] },
+  date: { type: Number, default: Date.now },
+  target: { type: String, default: 'ALL' },
+  actionLink: String,
+  metadata: Object
+});
+const Notification = mongoose.model('Notification', notificationSchema);
+
+const battleSchema = new mongoose.Schema({
+  roomId: { type: String, required: true, unique: true },
+  hostId: String,
+  createdAt: { type: Number, default: Date.now },
+  status: { type: String, enum: ['WAITING', 'ACTIVE', 'FINISHED'], default: 'WAITING' },
+  startTime: Number,
+  questions: Array,
+  config: {
+    subjects: [String], 
+    chapters: [String], 
+    mode: { type: String, enum: ['1v1', '2v2', 'FFA'], default: '1v1' },
+    questionCount: { type: Number, default: 5 },
+    timePerQuestion: { type: Number, default: 15 },
+    maxPlayers: { type: Number, default: 2 }
+  },
+  players: [{
+    uid: String,
+    name: String,
+    avatar: String,
+    score: { type: Number, default: 0 },
+    totalTimeTaken: { type: Number, default: 0 }, 
+    team: { type: String, enum: ['A', 'B', 'NONE'], default: 'NONE' },
+    answers: { type: Map, of: Number, default: {} } 
+  }]
+});
+const Battle = mongoose.model('Battle', battleSchema);
+
+const questionBankSchema = new mongoose.Schema({
+  subject: { type: String, required: true },
+  chapter: { type: String, required: true },
+  topic: String,
+  question: { type: String, required: true },
+  options: { type: [String], required: true },
+  correctAnswerIndex: { type: Number, required: true },
+  explanation: String,
+  difficulty: { type: String, default: 'MEDIUM' },
+  examRef: { type: String }, 
+  createdAt: { type: Number, default: Date.now }
+});
+questionBankSchema.index({ subject: 1, chapter: 1, topic: 1 });
+questionBankSchema.index({ examRef: 1 });
+const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
+
+// NEW: Stores metadata about uploaded Question Banks (Papers)
+const questionPaperSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true }, // e.g. medical_23_24
+  title: { type: String, required: true },
+  year: { type: String, required: true },
+  source: { type: String, required: true }, // Medical, Engineering, etc.
+  totalQuestions: { type: Number, default: 0 },
+  time: { type: Number, default: 60 }
+});
+const QuestionPaper = mongoose.model('QuestionPaper', questionPaperSchema);
+
+const savedQuestionSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'QuestionBank' },
+  folder: { type: String, default: 'General' },
+  savedAt: { type: Number, default: Date.now }
+});
+savedQuestionSchema.index({ userId: 1 });
+const SavedQuestion = mongoose.model('SavedQuestion', savedQuestionSchema);
+
+const mistakeSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  question: { type: String, required: true },
+  options: { type: [String], required: true },
+  correctAnswerIndex: { type: Number, required: true },
+  explanation: String,
+  subject: String,
+  chapter: String,
+  topic: String,
+  wrongCount: { type: Number, default: 1 },
+  lastMissed: { type: Number, default: Date.now }
+});
+mistakeSchema.index({ userId: 1 });
+const Mistake = mongoose.model('Mistake', mistakeSchema);
+
+const examResultSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  subject: { type: String, required: true },
+  totalQuestions: Number,
+  correct: Number,
+  wrong: Number,
+  skipped: Number,
+  score: Number,
+  topicStats: [{ topic: String, correct: Number, total: Number }],
+  timestamp: { type: Number, default: Date.now }
+});
+examResultSchema.index({ userId: 1 }); 
+const ExamResult = mongoose.model('ExamResult', examResultSchema);
+
+const examPackSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  title: String,
+  subtitle: String,
+  price: Number,
+  originalPrice: Number,
+  totalExams: Number,
+  features: [String],
+  theme: String,
+  tag: String
+});
+const ExamPack = mongoose.model('ExamPack', examPackSchema);
+
+// --- ROUTES ---
+
+app.get('/', (req, res) => {
+  res.send(`🚀 Dhrubok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
 });
 
-const User = mongoose.model('User', UserSchema);
-const QuestionBank = mongoose.model('QuestionBank', QuestionBankSchema);
-const PaymentRequest = mongoose.model('PaymentRequest', PaymentSchema);
-const Notification = mongoose.model('Notification', NotificationSchema);
+// --- QUESTS ---
 
-// --- SYLLABUS STATS HELPER ---
-async function getSyllabusStats() {
-    // This aggregates question counts from DB
-    const stats = {};
-    const questions = await QuestionBank.find({}, 'subject chapter topic');
-    
-    questions.forEach(q => {
-        if (!stats[q.subject]) {
-            stats[q.subject] = { total: 0, chapters: {} };
-        }
-        stats[q.subject].total++;
+app.post('/api/quests/update', async (req, res) => {
+    try {
+        const { userId, actionType, value } = req.body;
+        if (!isDbConnected()) return res.json({ success: true }); // Mock success
+
+        const user = await User.findOne({ uid: userId });
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        let updated = false;
         
-        if (q.chapter) {
-            if (!stats[q.subject].chapters[q.chapter]) {
-                stats[q.subject].chapters[q.chapter] = { total: 0, topics: {} };
-            }
-            stats[q.subject].chapters[q.chapter].total++;
-            
-            if (q.topic) {
-                if (!stats[q.subject].chapters[q.chapter].topics[q.topic]) {
-                    stats[q.subject].chapters[q.chapter].topics[q.topic] = 0;
+        // Helper to update quest list
+        const processQuests = (questList) => {
+            questList.forEach(quest => {
+                if (quest.type === actionType && !quest.completed) {
+                    quest.progress = Math.min(quest.target, quest.progress + value);
+                    if (quest.progress >= quest.target) {
+                        quest.completed = true;
+                    }
+                    updated = true;
                 }
-                stats[q.subject].chapters[q.chapter].topics[q.topic]++;
-            }
-        }
-    });
-    return stats;
-}
-
-// --- API ROUTES ---
-
-// 1. SYLLABUS STATS
-app.get('/api/syllabus/stats', async (req, res) => {
-    try {
-        const stats = await getSyllabusStats();
-        res.json(stats);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 2. QUIZ GENERATION (FROM DB)
-app.post('/api/quiz/generate-db', async (req, res) => {
-    try {
-        const { subject, chapter, topics, count } = req.body;
-        const query = { subject };
-        if (chapter && chapter !== 'Full Syllabus') query.chapter = chapter;
-        if (topics && topics.length > 0 && !topics.includes('পূর্ণাঙ্গ প্রস্তুতি (Full Syllabus)')) {
-            query.topic = { $in: topics };
-        }
-
-        const questions = await QuestionBank.aggregate([
-            { $match: query },
-            { $sample: { size: Number(count) || 10 } }
-        ]);
-        
-        res.json(questions);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 3. USER SYNC & PROFILE
-app.post('/api/user/sync', async (req, res) => {
-    try {
-        const { user, additionalData } = req.body;
-        if (!user || !user.uid) return res.status(400).send("No user data");
-
-        const updateData = {
-            uid: user.uid,
-            displayName: user.displayName,
-            email: user.email,
-            photoURL: user.photoURL,
-            ...additionalData
+            });
         };
 
-        const result = await User.findOneAndUpdate(
-            { uid: user.uid },
-            { $set: updateData },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-        res.json(result);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.get('/api/user/:userId/stats', async (req, res) => {
-    try {
-        const user = await User.findOne({ uid: req.params.userId });
-        if (!user) return res.status(404).json({ error: "User not found" });
-        res.json(user);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.get('/api/user/:userId/enrollments', async (req, res) => {
-    try {
-        const user = await User.findOne({ uid: req.params.userId });
-        res.json(user ? user.enrolledCourses : []);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 4. EXAM RESULTS & GAMIFICATION
-app.post('/api/user/:userId/exam-result', async (req, res) => {
-    try {
-        const { score, totalQuestions, correct, wrong, mistakes: newMistakes } = req.body;
-        const user = await User.findOne({ uid: req.params.userId });
-        if (!user) return res.status(404).send("User not found");
-
-        // Update Stats
-        user.totalExams += 1;
-        user.totalCorrect += correct;
-        user.totalWrong += wrong;
-        user.points += score; // Add logic for bonus points if needed
-
-        // Handle Mistakes
-        if (newMistakes && newMistakes.length > 0) {
-            for (const m of newMistakes) {
-                // If question has _id (from DB), add to mistake log
-                if (m._id) {
-                    const existingIndex = user.mistakes.findIndex(item => item.questionId && item.questionId.toString() === m._id);
-                    if (existingIndex > -1) {
-                        user.mistakes[existingIndex].wrongCount += 1;
-                        user.mistakes[existingIndex].lastMissed = Date.now();
-                    } else {
-                        user.mistakes.push({ questionId: m._id, wrongCount: 1 });
-                    }
-                }
-            }
-        }
-
-        await user.save();
-        res.json({ success: true, points: user.points });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/api/user/:userId/quest-progress', async (req, res) => {
-    try {
-        const { questType, amount } = req.body;
-        const user = await User.findOne({ uid: req.params.userId });
-        if (!user) return res.status(404).send("User not found");
-
-        // Logic to initialize daily quests if empty or old
-        const today = new Date().setHours(0,0,0,0);
-        const lastUpdated = user.quests[0]?.lastUpdated || 0;
-        
-        if (lastUpdated < today) {
-            // Reset Daily Quests
-            user.quests = [
-                { id: 'q1', title: 'Daily Warmup', description: 'Complete 1 Quiz', type: 'EXAM_COMPLETE', target: 1, progress: 0, reward: 50, completed: false, claimed: false, icon: 'Zap', category: 'DAILY', lastUpdated: Date.now() },
-                { id: 'q2', title: 'Sharpshooter', description: 'Score 80% in a quiz', type: 'HIGH_SCORE', target: 1, progress: 0, reward: 100, completed: false, claimed: false, icon: 'Target', category: 'DAILY', lastUpdated: Date.now() },
-                { id: 'q3', title: 'Knowledge Seeker', description: 'Study for 30 mins', type: 'STUDY_TIME', target: 30, progress: 0, reward: 150, completed: false, claimed: false, icon: 'Clock', category: 'DAILY', lastUpdated: Date.now() },
-                { id: 'q4', title: 'Curious Mind', description: 'Ask AI Tutor', type: 'ASK_AI', target: 1, progress: 0, reward: 30, completed: false, claimed: false, icon: 'Bot', category: 'DAILY', lastUpdated: Date.now() },
-                { id: 'q5', title: 'Collector', description: 'Save a Question', type: 'SAVE_QUESTION', target: 1, progress: 0, reward: 20, completed: false, claimed: false, icon: 'Bookmark', category: 'DAILY', lastUpdated: Date.now() }
-            ];
-        }
-
-        // Update Progress
-        let updated = false;
-        user.quests.forEach(q => {
-            if (q.type === questType && !q.completed) {
-                q.progress += amount;
-                if (q.progress >= q.target) {
-                    q.progress = q.target;
-                    q.completed = true;
-                }
-                updated = true;
-            }
-        });
+        processQuests(user.dailyQuests);
+        processQuests(user.weeklyQuests);
 
         if (updated) await user.save();
-        res.json({ success: true, quests: user.quests });
+        res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-app.post('/api/user/:userId/claim-quest', async (req, res) => {
+app.post('/api/quests/claim', async (req, res) => {
     try {
-        const { questId } = req.body;
-        const user = await User.findOne({ uid: req.params.userId });
-        if (!user) return res.status(404).send("User not found");
+        const { userId, questId, category } = req.body;
+        if (!isDbConnected()) return res.json({ success: true, points: 1250 + 50 });
 
-        const quest = user.quests.find(q => q.id === questId);
+        const user = await User.findOne({ uid: userId });
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        const list = category === 'WEEKLY' ? user.weeklyQuests : user.dailyQuests;
+        const quest = list.find(q => q.id === questId);
+
         if (quest && quest.completed && !quest.claimed) {
             quest.claimed = true;
             user.points += quest.reward;
             await user.save();
             res.json({ success: true, points: user.points });
         } else {
-            res.status(400).json({ success: false, message: "Cannot claim quest" });
+            res.status(400).json({ error: 'Quest not eligible' });
         }
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 5. SAVED QUESTIONS & MISTAKES
-app.get('/api/user/:userId/saved-questions', async (req, res) => {
-    try {
-        const user = await User.findOne({ uid: req.params.userId }).populate('savedQuestions.questionId');
-        // Filter out nulls (deleted questions)
-        const validSaved = user.savedQuestions.filter(sq => sq.questionId != null);
-        res.json(validSaved);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+// --- USERS ---
 
-app.post('/api/user/:userId/save-question', async (req, res) => {
+app.post('/api/users/sync', async (req, res) => {
     try {
-        const { questionId } = req.body;
-        const user = await User.findOne({ uid: req.params.userId });
-        
-        // Check duplicate
-        if (!user.savedQuestions.some(sq => sq.questionId.toString() === questionId)) {
-            user.savedQuestions.push({ questionId });
-            await user.save();
-        }
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.delete('/api/user/:userId/saved-questions/:id', async (req, res) => {
-    try {
-        const user = await User.findOne({ uid: req.params.userId });
-        user.savedQuestions = user.savedQuestions.filter(sq => sq._id.toString() !== req.params.id);
-        await user.save();
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/api/user/:userId/unsave-question', async (req, res) => {
-    try {
-        const { questionId } = req.body;
-        const user = await User.findOne({ uid: req.params.userId });
-        user.savedQuestions = user.savedQuestions.filter(sq => sq.questionId.toString() !== questionId);
-        await user.save();
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.patch('/api/user/:userId/saved-questions/:id/folder', async (req, res) => {
-    try {
-        const { folder } = req.body;
-        const user = await User.findOne({ uid: req.params.userId });
-        const item = user.savedQuestions.id(req.params.id);
-        if (item) {
-            item.folder = folder;
-            await user.save();
-            res.json({ success: true });
+        const userData = req.body;
+        if (isDbConnected()) {
+            await User.findOneAndUpdate(
+                { uid: userData.uid },
+                { $set: userData, $setOnInsert: { createdAt: Date.now() } },
+                { upsert: true, new: true }
+            );
         } else {
-            res.status(404).send("Item not found");
+            const idx = memoryDb.users.findIndex(u => u.uid === userData.uid);
+            if (idx >= 0) memoryDb.users[idx] = { ...memoryDb.users[idx], ...userData };
+            else memoryDb.users.push(userData);
         }
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.get('/api/user/:userId/mistakes', async (req, res) => {
-    try {
-        const user = await User.findOne({ uid: req.params.userId }).populate('mistakes.questionId');
-        // Flatten and clean
-        const result = user.mistakes
-            .filter(m => m.questionId != null)
-            .map(m => ({
-                _id: m._id,
-                ...m.questionId.toObject(),
-                wrongCount: m.wrongCount,
-                lastMissed: m.lastMissed
-            }));
-        res.json(result);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.delete('/api/user/:userId/mistakes/:id', async (req, res) => {
-    try {
-        const user = await User.findOne({ uid: req.params.userId });
-        user.mistakes = user.mistakes.filter(m => m._id.toString() !== req.params.id);
-        await user.save();
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 6. ADMIN & PAYMENTS
-app.post('/api/payments/submit', async (req, res) => {
+app.get('/api/users/:userId/stats', async (req, res) => {
     try {
-        const newPayment = new PaymentRequest(req.body);
-        await newPayment.save();
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+        if (isDbConnected()) {
+            const user = await User.findOne({ uid: req.params.userId });
+            res.json(user ? { 
+                points: user.points, 
+                totalExams: user.totalExams,
+                totalCorrect: user.stats.totalCorrect,
+                totalWrong: user.stats.totalWrong,
+                subjectBreakdown: Array.from(user.stats.subjectStats.entries()).map(([k,v]) => ({ 
+                    subject: k, 
+                    accuracy: v.total > 0 ? (v.correct/v.total)*100 : 0 
+                })),
+                strongestTopics: Array.from(user.stats.topicStats.entries())
+                    .map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 }))
+                    .sort((a,b) => b.accuracy - a.accuracy).slice(0, 3),
+                weakestTopics: Array.from(user.stats.topicStats.entries())
+                    .map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 }))
+                    .sort((a,b) => a.accuracy - b.accuracy).slice(0, 3),
+                quests: user.dailyQuests,
+                weeklyQuests: user.weeklyQuests,
+                user: user // Return full user object for profile info
+            } : {});
+        } else {
+            res.json({ points: 1250, totalExams: 15 });
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/admin/payments', async (req, res) => {
+app.post('/api/users/:userId/exam-results', async (req, res) => {
     try {
-        const payments = await PaymentRequest.find().sort({ timestamp: -1 });
-        res.json(payments);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+        const { userId } = req.params;
+        const resultData = req.body;
 
-app.patch('/api/admin/payments/:id/status', async (req, res) => {
-    try {
-        const { status } = req.body;
-        const payment = await PaymentRequest.findByIdAndUpdate(req.params.id, { status }, { new: true });
-        
-        if (status === 'APPROVED' && payment) {
-            // Auto Enroll User
-            const user = await User.findOne({ uid: payment.userId });
+        if (isDbConnected()) {
+            // Save Result Log
+            await ExamResult.create({ userId, ...resultData });
+
+            // Update User Stats
+            const user = await User.findOne({ uid: userId });
             if (user) {
-                // Check if already enrolled
-                if (!user.enrolledCourses.some(c => c.id === payment.courseId)) {
-                    user.enrolledCourses.push({
-                        id: payment.courseId,
-                        title: payment.courseTitle,
-                        progress: 0,
-                        enrolledAt: Date.now()
-                    });
-                    await user.save();
+                user.totalExams += 1;
+                user.points += (resultData.score > 0 ? (resultData.correct * 5) + 10 : 0);
+                user.stats.totalCorrect += resultData.correct;
+                user.stats.totalWrong += resultData.wrong;
+                user.stats.totalSkipped += resultData.skipped;
+
+                // Update Subject Stats
+                const subjStat = user.stats.subjectStats.get(resultData.subject) || { correct: 0, total: 0 };
+                subjStat.correct += resultData.correct;
+                subjStat.total += resultData.totalQuestions; // Assuming all Qs belong to this subject for simple exams
+                user.stats.subjectStats.set(resultData.subject, subjStat);
+
+                // Update Topic Stats
+                resultData.topicStats.forEach(t => {
+                    const topicStat = user.stats.topicStats.get(t.topic) || { correct: 0, total: 0 };
+                    topicStat.correct += t.correct;
+                    topicStat.total += t.total;
+                    user.stats.topicStats.set(t.topic, topicStat);
+                });
+
+                await user.save();
+            }
+
+            // Save Mistakes
+            if (resultData.mistakes && resultData.mistakes.length > 0) {
+                for (const m of resultData.mistakes) {
+                    await Mistake.findOneAndUpdate(
+                        { userId, question: m.question }, // Simple dedup by question text
+                        { 
+                            $setOnInsert: { 
+                                options: m.options, 
+                                correctAnswerIndex: m.correctAnswerIndex,
+                                explanation: m.explanation,
+                                subject: m.subject,
+                                chapter: m.chapter,
+                                topic: m.topic
+                            },
+                            $inc: { wrongCount: 1 },
+                            $set: { lastMissed: Date.now() }
+                        },
+                        { upsert: true }
+                    );
                 }
             }
         }
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.delete('/api/admin/payments/:id', async (req, res) => {
+// --- SAVED QUESTIONS ---
+
+app.get('/api/users/:userId/saved-questions', async (req, res) => {
     try {
-        await PaymentRequest.findByIdAndDelete(req.params.id);
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+        if (isDbConnected()) {
+            const saved = await SavedQuestion.find({ userId: req.params.userId }).populate('questionId');
+            res.json(saved.filter(s => s.questionId)); // Filter out null populated questions
+        } else {
+            res.json(memoryDb.savedQuestions.filter(s => s.userId === req.params.userId));
+        }
+    } catch (e) { res.status(500).json({error: e.message}); }
 });
 
-app.get('/api/admin/stats', async (req, res) => {
+app.post('/api/users/:userId/saved-questions', async (req, res) => {
     try {
-        const totalUsers = await User.countDocuments();
-        const totalQuestions = await QuestionBank.countDocuments();
-        
-        const payments = await PaymentRequest.find();
-        const totalRevenue = payments
-            .filter(p => p.status === 'APPROVED')
-            .reduce((sum, p) => sum + p.amount, 0);
-        
-        const pendingPayments = payments.filter(p => p.status === 'PENDING').length;
-        const approvedEnrollments = payments.filter(p => p.status === 'APPROVED').length;
-
-        // Mock total exams taken (sum of all users)
-        // In real app, might want to optimize this aggregation
-        const users = await User.find({}, 'totalExams');
-        const totalExams = users.reduce((sum, u) => sum + (u.totalExams || 0), 0);
-
-        res.json({
-            totalUsers,
-            totalQuestions,
-            totalRevenue,
-            pendingPayments,
-            approvedEnrollments,
-            totalExams
-        });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 7. QUESTION BANK MANAGEMENT
-app.post('/api/admin/questions', async (req, res) => {
-    try {
-        const { questions, metadata } = req.body;
-        // Batch insert
-        if (questions && Array.isArray(questions)) {
-            await QuestionBank.insertMany(questions);
+        const { questionId, folder } = req.body;
+        if (isDbConnected()) {
+            await SavedQuestion.create({ userId: req.params.userId, questionId, folder });
+        } else {
+            memoryDb.savedQuestions.push({ _id: Date.now(), userId: req.params.userId, questionId, folder });
         }
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({error: e.message}); }
 });
 
-// GET: All Questions (Admin Viewer) with ExamRef Search
+app.patch('/api/users/:userId/saved-questions/:id', async (req, res) => {
+    try {
+        const { folder } = req.body;
+        if (isDbConnected()) {
+            await SavedQuestion.findByIdAndUpdate(req.params.id, { folder });
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+app.delete('/api/users/:userId/saved-questions/:id', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            await SavedQuestion.findByIdAndDelete(req.params.id);
+        } else {
+            memoryDb.savedQuestions = memoryDb.savedQuestions.filter(s => s._id.toString() !== req.params.id);
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+app.delete('/api/users/:userId/saved-questions/by-q/:questionId', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            await SavedQuestion.findOneAndDelete({ userId: req.params.userId, questionId: req.params.questionId });
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+// --- MISTAKES ---
+
+app.get('/api/users/:userId/mistakes', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const mistakes = await Mistake.find({ userId: req.params.userId }).sort({ lastMissed: -1 });
+            res.json(mistakes);
+        } else {
+            res.json(memoryDb.mistakes.filter(m => m.userId === req.params.userId));
+        }
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+app.delete('/api/users/:userId/mistakes/:id', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            await Mistake.findByIdAndDelete(req.params.id);
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+// --- QUESTION BANK ADMIN ---
+
+// GET: All Questions (Admin Viewer)
 app.get('/api/admin/questions', async (req, res) => {
     try {
-        const { page = 1, limit = 10, subject, chapter, examRef } = req.query;
+        const { page = 1, limit = 10, subject, chapter } = req.query;
         const query = {};
         if(subject) query.subject = subject;
         if(chapter) query.chapter = chapter;
-        if(examRef) query.examRef = { $regex: examRef, $options: 'i' }; // Regex Search
 
-        const questions = await QuestionBank.find(query)
-            .skip((page-1)*limit)
-            .limit(Number(limit))
-            .sort({ createdAt: -1 });
+        if(isDbConnected()) {
+            const questions = await QuestionBank.find(query).skip((page-1)*limit).limit(Number(limit)).sort({createdAt: -1});
+            const total = await QuestionBank.countDocuments(query);
+            res.json({ questions, total });
+        } else {
+            const qs = memoryDb.questions.filter(q => (!subject || q.subject === subject) && (!chapter || q.chapter === chapter));
+            res.json({ questions: qs.slice((page-1)*limit, page*limit), total: qs.length });
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// POST: Bulk Upload + Paper Metadata
+app.post('/api/admin/questions/bulk', async (req, res) => {
+    try {
+        const { questions, metadata } = req.body;
+        
+        if(isDbConnected()) {
+            // 1. Insert Questions
+            await QuestionBank.insertMany(questions);
             
-        const total = await QuestionBank.countDocuments(query);
-        res.json({ questions, total });
-    } catch(e) { 
-        res.status(500).json({error: e.message}); 
-    }
+            // 2. Insert/Update Paper Metadata if provided
+            if (metadata) {
+                await QuestionPaper.findOneAndUpdate(
+                    { id: metadata.id },
+                    metadata,
+                    { upsert: true, new: true }
+                );
+            }
+        } else {
+            questions.forEach(q => memoryDb.questions.push({...q, _id: Date.now() + Math.random()}));
+            if (metadata) {
+                const existingIdx = memoryDb.questionPapers.findIndex(p => p.id === metadata.id);
+                if (existingIdx >= 0) memoryDb.questionPapers[existingIdx] = metadata;
+                else memoryDb.questionPapers.push(metadata);
+            }
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
 });
 
 app.delete('/api/admin/questions/:id', async (req, res) => {
     try {
-        await QuestionBank.findByIdAndDelete(req.params.id);
+        if(isDbConnected()) {
+            await QuestionBank.findByIdAndDelete(req.params.id);
+        }
         res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// GET: List of Available Question Papers
+app.get('/api/question-papers', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const papers = await QuestionPaper.find().sort({ year: -1 });
+            res.json(papers);
+        } else {
+            res.json(memoryDb.questionPapers);
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// --- EXAM REF SPECIFIC ROUTE ---
+app.get('/api/quiz/past-paper/:examRef', async (req, res) => {
+    try {
+        const { examRef } = req.params;
+        if (isDbConnected()) {
+            const questions = await QuestionBank.find({ examRef });
+            res.json(questions);
+        } else {
+            const questions = memoryDb.questions.filter(q => q.examRef === examRef);
+            res.json(questions);
+        }
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// 8. PAST PAPERS & PACKS
-app.get('/api/question-papers', async (req, res) => {
+// --- QUIZ GENERATION FROM DB ---
+
+app.post('/api/quiz/generate-from-db', async (req, res) => {
     try {
-        // Aggregate metadata from QuestionBank based on examRef
-        const papers = await QuestionBank.aggregate([
-            { $match: { examRef: { $exists: true, $ne: "" } } },
-            { 
-                $group: { 
-                    _id: "$examRef", 
-                    count: { $sum: 1 },
-                    // Just take the first subject/source as sample, real app might have separate Paper collection
-                    sampleSubject: { $first: "$subject" } 
-                } 
+        const { subject, chapter, topics, count } = req.body;
+        
+        if (isDbConnected()) {
+            // Complex aggregation to get random questions matching criteria
+            const pipeline = [
+                { $match: { 
+                    subject, 
+                    chapter: chapter === 'Full Syllabus' ? { $exists: true } : chapter,
+                    ...(topics && topics.length > 0 && topics[0] !== 'Full Syllabus' ? { topic: { $in: topics } } : {})
+                }},
+                { $sample: { size: count } }
+            ];
+            const questions = await QuestionBank.aggregate(pipeline);
+            res.json(questions);
+        } else {
+            const filtered = memoryDb.questions.filter(q => 
+                q.subject === subject && 
+                (chapter === 'Full Syllabus' || q.chapter === chapter)
+            );
+            // Shuffle
+            const shuffled = filtered.sort(() => 0.5 - Math.random()).slice(0, count);
+            res.json(shuffled);
+        }
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/quiz/syllabus-stats', async (req, res) => {
+    try {
+        if (!isDbConnected()) return res.json({});
+
+        // Aggregation to count questions per Subject -> Chapter -> Topic
+        const stats = await QuestionBank.aggregate([
+            {
+                $group: {
+                    _id: { subject: "$subject", chapter: "$chapter", topic: "$topic" },
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $group: {
+                    _id: { subject: "$_id.subject", chapter: "$_id.chapter" },
+                    topics: { $push: { k: "$_id.topic", v: "$count" } },
+                    totalChapter: { $sum: "$count" }
+                }
+            },
+            {
+                $group: {
+                    _id: "$_id.subject",
+                    chapters: { 
+                        $push: { 
+                            k: "$_id.chapter", 
+                            v: { total: "$totalChapter", topics: { $arrayToObject: "$topics" } } 
+                        } 
+                    },
+                    totalSubject: { $sum: "$totalChapter" }
+                }
             }
         ]);
 
-        // Map aggregated data to QuestionPaperMetadata format
-        const formatted = papers.map(p => {
-            // Heuristic to determine source/title from ID (e.g. medical_2023)
-            const parts = p._id.split('_');
-            const year = parts[parts.length - 1];
-            const source = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
-            
-            return {
-                id: p._id,
-                title: `${source} Admission Test`, // Generic Title, ideally stored in a Paper collection
-                year: year,
-                source: source, // e.g. Medical
-                totalQuestions: p.count,
-                time: 60 // Default
+        // Transform to cleaner JSON structure
+        const formatted = {};
+        stats.forEach(s => {
+            const chaptersObj = {};
+            s.chapters.forEach(c => chaptersObj[c.k] = c.v);
+            formatted[s._id] = {
+                total: s.totalSubject,
+                chapters: chaptersObj
             };
         });
 
         res.json(formatted);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({error: e.message}); }
 });
 
-app.get('/api/questions/by-exam/:examRef', async (req, res) => {
+// --- PAYMENTS & ADMIN ---
+
+app.get('/api/admin/payments', async (req, res) => {
     try {
-        const questions = await QuestionBank.find({ examRef: req.params.examRef });
-        res.json(questions);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+        if(isDbConnected()) {
+            const payments = await Payment.find().sort({ timestamp: -1 });
+            res.json(payments);
+        } else {
+            res.json(memoryDb.payments);
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-app.get('/api/exam-packs', (req, res) => {
-    // Static data for now, could be DB
-    const PACKS = [
-      { id: 'pack_medical_final', title: 'Medical Final Model Test', subtitle: '10 Full Sets', price: 500, originalPrice: 1000, totalExams: 10, features: ['Negative Marking', 'Merit List'], theme: 'emerald', tag: 'Medical' },
-      { id: 'pack_eng_final', title: 'Engineering Final Prep', subtitle: 'BUET Standard', price: 600, originalPrice: 1200, totalExams: 8, features: ['Written + MCQ', 'Detailed Solution'], theme: 'blue', tag: 'Engineering' }
-    ];
-    res.json(PACKS);
+app.post('/api/payments', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            await Payment.create(req.body);
+        } else {
+            memoryDb.payments.push({ ...req.body, id: Date.now().toString(), status: 'PENDING', timestamp: Date.now() });
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// 9. LEADERBOARD
+app.put('/api/admin/payments/:id', async (req, res) => {
+    try {
+        const { status } = req.body;
+        if(isDbConnected()) {
+            await Payment.findByIdAndUpdate(req.params.id, { status });
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.delete('/api/admin/payments/:id', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            await Payment.findByIdAndDelete(req.params.id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/admin/stats', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            const totalRevenue = await Payment.aggregate([
+                { $match: { status: 'APPROVED' } },
+                { $group: { _id: null, total: { $sum: "$amount" } } }
+            ]);
+            const approvedEnrollments = await Payment.countDocuments({ status: 'APPROVED' });
+            const pendingPayments = await Payment.countDocuments({ status: 'PENDING' });
+            const totalUsers = await User.countDocuments();
+            const totalQuestions = await QuestionBank.countDocuments();
+            
+            // Calculate total exams taken from User stats
+            const totalExamsAgg = await User.aggregate([{ $group: { _id: null, total: { $sum: "$totalExams" } } }]);
+
+            res.json({
+                totalRevenue: totalRevenue[0]?.total || 0,
+                approvedEnrollments,
+                pendingPayments,
+                totalUsers,
+                totalQuestions,
+                totalExams: totalExamsAgg[0]?.total || 0
+            });
+        } else {
+            res.json({ totalRevenue: 0, approvedEnrollments: 0, pendingPayments: 0, totalUsers: 0, totalQuestions: 0, totalExams: 0 });
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// --- LEADERBOARD ---
+
 app.get('/api/leaderboard', async (req, res) => {
     try {
-        const users = await User.find({}, 'uid displayName photoURL points college').sort({ points: -1 }).limit(50);
-        res.json(users);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+        if(isDbConnected()) {
+            const users = await User.find({}, 'uid displayName photoURL points college hscBatch target department').sort({ points: -1 }).limit(100);
+            res.json(users);
+        } else {
+            res.json([
+                { uid: '1', displayName: 'Tahmid', points: 5000 },
+                { uid: '2', displayName: 'Rafiq', points: 4500 }
+            ]);
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// 10. NOTIFICATIONS
+// --- NOTIFICATIONS ---
+
 app.get('/api/notifications', async (req, res) => {
     try {
-        const notifs = await Notification.find().sort({ date: -1 }).limit(20);
-        res.json(notifs);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+        if(isDbConnected()) {
+            const notifs = await Notification.find().sort({ date: -1 }).limit(50);
+            res.json(notifs);
+        } else {
+            res.json(memoryDb.notifications);
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
 });
 
 app.post('/api/admin/notifications', async (req, res) => {
     try {
-        const notif = new Notification(req.body);
-        await notif.save();
+        if(isDbConnected()) {
+            await Notification.create(req.body);
+        } else {
+            memoryDb.notifications.push({ ...req.body, _id: Date.now().toString(), date: Date.now() });
+        }
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// Start Server
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// --- EXAM PACKS ---
+// (Currently using static mock, but ready for DB)
+app.get('/api/exam-packs', async (req, res) => {
+    if(isDbConnected()) {
+        const packs = await ExamPack.find();
+        if (packs.length > 0) return res.json(packs);
+    }
+    // Fallback Mock
+    res.json([
+        {
+          id: 'med-final-24',
+          title: 'মেডিকেল ফাইনাল মডেল টেস্ট',
+          subtitle: 'শেষ মুহূর্তের পূর্ণাঙ্গ প্রস্তুতি (১০০টি মডেল টেস্ট)',
+          price: 500,
+          originalPrice: 1500,
+          totalExams: 100,
+          features: ['সম্পূর্ণ সিলেবাসের ওপর পরীক্ষা', 'নেগেটিভ মার্কিং প্র্যাকটিস', 'মেডিকেল স্ট্যান্ডার্ড প্রশ্ন', 'সলভ শিট ও ব্যাখ্যা'],
+          theme: 'emerald',
+          tag: 'Best Seller'
+        },
+        // ... other mocks
+    ]);
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
