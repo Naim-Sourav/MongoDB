@@ -575,16 +575,23 @@ app.get('/api/quiz/past-paper/:examRef', async (req, res) => {
 
 app.post('/api/quiz/generate-from-db', async (req, res) => {
     try {
-        const { subject, chapter, topics, count } = req.body;
+        const { subject, chapter, topics, count, source } = req.body;
         
         if (isDbConnected()) {
-            // Complex aggregation to get random questions matching criteria
+            const query = {
+                subject, 
+                chapter: chapter === 'Full Syllabus' ? { $exists: true } : chapter,
+                ...(topics && topics.length > 0 && topics[0] !== 'Full Syllabus' ? { topic: { $in: topics } } : {})
+            };
+
+            // Filter by source (e.g. Medical) if provided
+            if (source) {
+                const prefix = source.toLowerCase().replace(/\s+/g, '_');
+                query.examRef = { $regex: new RegExp(`^${prefix}`, 'i') };
+            }
+
             const pipeline = [
-                { $match: { 
-                    subject, 
-                    chapter: chapter === 'Full Syllabus' ? { $exists: true } : chapter,
-                    ...(topics && topics.length > 0 && topics[0] !== 'Full Syllabus' ? { topic: { $in: topics } } : {})
-                }},
+                { $match: query },
                 { $sample: { size: count } }
             ];
             const questions = await QuestionBank.aggregate(pipeline);
@@ -605,8 +612,16 @@ app.get('/api/quiz/syllabus-stats', async (req, res) => {
     try {
         if (!isDbConnected()) return res.json({});
 
-        // Aggregation to count questions per Subject -> Chapter -> Topic
+        const { source } = req.query;
+        const matchStage = {};
+        
+        if (source && source !== 'DEFAULT') {
+             const prefix = source.toLowerCase().replace(/\s+/g, '_');
+             matchStage.examRef = { $regex: new RegExp(`^${prefix}`, 'i') };
+        }
+
         const stats = await QuestionBank.aggregate([
+            { $match: matchStage },
             {
                 $group: {
                     _id: { subject: "$subject", chapter: "$chapter", topic: "$topic" },
