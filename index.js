@@ -42,6 +42,38 @@ mongoose.connect(MONGODB_URI, {
 // Helper to check DB status
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
+// --- UTILS: QUEST GENERATOR ---
+const QUEST_TYPES = [
+    { type: 'EXAM_COMPLETE', title: 'মডেল টেস্ট হিরো', desc: '১টি মডেল টেস্ট সম্পন্ন করো', target: 1, reward: 50, icon: 'FileCheck' },
+    { type: 'EXAM_COMPLETE', title: 'এক্সাম ম্যারাথন', desc: '৩টি মডেল টেস্ট সম্পন্ন করো', target: 3, reward: 100, icon: 'FileCheck' },
+    { type: 'HIGH_SCORE', title: 'পারফেকশনিস্ট', desc: '১টি পরীক্ষায় ৮০% নম্বর পাও', target: 1, reward: 80, icon: 'Target' },
+    { type: 'STUDY_TIME', title: 'পড়ুয়া', desc: '২০ মিনিট পড়াশোনা ট্র্যাক করো', target: 20, reward: 60, icon: 'Clock' },
+    { type: 'PLAY_BATTLE', title: 'ব্যাটল ওয়ারিয়র', desc: '১টি কুইজ ব্যাটল খেলো', target: 1, reward: 50, icon: 'Swords' },
+    { type: 'WIN_BATTLE', title: 'বিজয় উল্লাস', desc: '১টি কুইজ ব্যাটল জেতো', target: 1, reward: 100, icon: 'Trophy' },
+    { type: 'ASK_AI', title: 'কৌতুহলী', desc: 'AI কে ২ বার প্রশ্ন করো', target: 2, reward: 40, icon: 'Bot' },
+    { type: 'SAVE_QUESTION', title: 'সংগ্রাহক', desc: '৩টি প্রশ্ন সেভ করো', target: 3, reward: 30, icon: 'Bookmark' }
+];
+
+const generateDailyQuests = () => {
+    // Shuffle and pick 3 random quests
+    const shuffled = [...QUEST_TYPES].sort(() => 0.5 - Math.random());
+    const selected = shuffled.slice(0, 3);
+    
+    return selected.map((q, idx) => ({
+        id: `dq_${Date.now()}_${idx}`,
+        title: q.title,
+        description: q.desc,
+        type: q.type,
+        target: q.target,
+        progress: 0,
+        reward: q.reward,
+        completed: false,
+        claimed: false,
+        icon: q.icon,
+        category: 'DAILY'
+    }));
+};
+
 // --- Schemas & Models (Mongoose) ---
 
 const questTemplateSchema = new mongoose.Schema({
@@ -238,35 +270,66 @@ app.get('/', (req, res) => {
 
 // --- QUESTS ---
 
+// Helper function to check and reset quests
+const checkAndResetUserQuests = async (user) => {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    
+    // Daily Reset
+    if (!user.lastQuestReset || user.lastQuestReset < todayStart) {
+        user.dailyQuests = generateDailyQuests();
+        user.lastQuestReset = Date.now();
+    }
+    // Weekly Reset logic could go here
+    return user;
+};
+
 app.post('/api/quests/update', async (req, res) => {
     try {
         const { userId, actionType, value } = req.body;
-        if (!isDbConnected()) return res.json({ success: true }); // Mock success
+        
+        let user;
+        let isUpdated = false;
 
-        const user = await User.findOne({ uid: userId });
+        if (isDbConnected()) {
+            user = await User.findOne({ uid: userId });
+        } else {
+            user = memoryDb.users.find(u => u.uid === userId);
+        }
+
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        let updated = false;
-        
-        // Helper to update quest list
+        // Ensure quests are initialized if running in memory/first time
+        if (!user.dailyQuests || user.dailyQuests.length === 0) {
+            user.dailyQuests = generateDailyQuests();
+            isUpdated = true;
+        }
+
+        // Update Logic
         const processQuests = (questList) => {
             questList.forEach(quest => {
                 if (quest.type === actionType && !quest.completed) {
-                    quest.progress = Math.min(quest.target, quest.progress + value);
+                    quest.progress = Math.min(quest.target, (quest.progress || 0) + Number(value));
                     if (quest.progress >= quest.target) {
                         quest.completed = true;
+                        // Optional: Send notification for completion
                     }
-                    updated = true;
+                    isUpdated = true;
                 }
             });
         };
 
-        processQuests(user.dailyQuests);
-        processQuests(user.weeklyQuests);
+        if (user.dailyQuests) processQuests(user.dailyQuests);
+        if (user.weeklyQuests) processQuests(user.weeklyQuests);
 
-        if (updated) await user.save();
-        res.json({ success: true });
+        if (isUpdated) {
+            if (isDbConnected()) await user.save();
+            // In memory, reference is already updated
+        }
+        
+        res.json({ success: true, quests: user.dailyQuests });
     } catch (e) {
+        console.error(e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -274,21 +337,34 @@ app.post('/api/quests/update', async (req, res) => {
 app.post('/api/quests/claim', async (req, res) => {
     try {
         const { userId, questId, category } = req.body;
-        if (!isDbConnected()) return res.json({ success: true, points: 1250 + 50 });
+        
+        let user;
+        if (isDbConnected()) {
+            user = await User.findOne({ uid: userId });
+        } else {
+            user = memoryDb.users.find(u => u.uid === userId);
+        }
 
-        const user = await User.findOne({ uid: userId });
         if (!user) return res.status(404).json({ error: 'User not found' });
+
+        // Handle Lifetime quests (Mock for now as they are static in frontend)
+        if (category === 'LIFETIME') {
+             // Just verify generic logic or log it
+             return res.json({ success: true, points: user.points }); 
+        }
 
         const list = category === 'WEEKLY' ? user.weeklyQuests : user.dailyQuests;
         const quest = list.find(q => q.id === questId);
 
         if (quest && quest.completed && !quest.claimed) {
             quest.claimed = true;
-            user.points += quest.reward;
-            await user.save();
+            user.points = (user.points || 0) + quest.reward;
+            
+            if (isDbConnected()) await user.save();
+            
             res.json({ success: true, points: user.points });
         } else {
-            res.status(400).json({ error: 'Quest not eligible' });
+            res.status(400).json({ error: 'Quest not eligible or already claimed' });
         }
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -301,15 +377,35 @@ app.post('/api/users/sync', async (req, res) => {
     try {
         const userData = req.body;
         if (isDbConnected()) {
-            await User.findOneAndUpdate(
-                { uid: userData.uid },
-                { $set: userData, $setOnInsert: { createdAt: Date.now() } },
-                { upsert: true, new: true }
-            );
+            let user = await User.findOne({ uid: userData.uid });
+            if (!user) {
+                // New user: Create with initial quests
+                user = new User({
+                    ...userData,
+                    dailyQuests: generateDailyQuests(),
+                    lastQuestReset: Date.now()
+                });
+                await user.save();
+            } else {
+                // Update existing
+                await User.findOneAndUpdate(
+                    { uid: userData.uid },
+                    { $set: userData },
+                    { new: true }
+                );
+            }
         } else {
             const idx = memoryDb.users.findIndex(u => u.uid === userData.uid);
             if (idx >= 0) memoryDb.users[idx] = { ...memoryDb.users[idx], ...userData };
-            else memoryDb.users.push(userData);
+            else {
+                memoryDb.users.push({
+                    ...userData, 
+                    dailyQuests: generateDailyQuests(),
+                    points: 0,
+                    totalExams: 0,
+                    stats: { subjectStats: {}, topicStats: {} }
+                });
+            }
         }
         res.json({ success: true });
     } catch (e) {
@@ -319,29 +415,55 @@ app.post('/api/users/sync', async (req, res) => {
 
 app.get('/api/users/:userId/stats', async (req, res) => {
     try {
+        let user;
         if (isDbConnected()) {
-            const user = await User.findOne({ uid: req.params.userId });
-            res.json(user ? { 
+            user = await User.findOne({ uid: req.params.userId });
+            if (user) {
+                // Check for daily reset on fetch
+                const updatedUser = await checkAndResetUserQuests(user);
+                if (updatedUser !== user) {
+                    await updatedUser.save();
+                    user = updatedUser;
+                }
+            }
+        } else {
+            user = memoryDb.users.find(u => u.uid === req.params.userId);
+            // Basic memory reset check
+            if (user) {
+                 const now = new Date();
+                 const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+                 if (!user.lastQuestReset || user.lastQuestReset < todayStart) {
+                     user.dailyQuests = generateDailyQuests();
+                     user.lastQuestReset = Date.now();
+                 }
+            }
+        }
+
+        if (user) {
+            // Safe handling for Maps if using in-memory vs mongoose
+            const subjStats = user.stats.subjectStats instanceof Map 
+                ? Array.from(user.stats.subjectStats.entries()).map(([k,v]) => ({ subject: k, accuracy: v.total > 0 ? (v.correct/v.total)*100 : 0 }))
+                : []; // Handle differently if plain object in memory
+            
+            const topicStats = user.stats.topicStats instanceof Map
+                ? Array.from(user.stats.topicStats.entries())
+                : [];
+
+            res.json({ 
                 points: user.points, 
                 totalExams: user.totalExams,
                 totalCorrect: user.stats.totalCorrect,
                 totalWrong: user.stats.totalWrong,
-                subjectBreakdown: Array.from(user.stats.subjectStats.entries()).map(([k,v]) => ({ 
-                    subject: k, 
-                    accuracy: v.total > 0 ? (v.correct/v.total)*100 : 0 
-                })),
-                strongestTopics: Array.from(user.stats.topicStats.entries())
-                    .map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 }))
-                    .sort((a,b) => b.accuracy - a.accuracy).slice(0, 3),
-                weakestTopics: Array.from(user.stats.topicStats.entries())
-                    .map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 }))
-                    .sort((a,b) => a.accuracy - b.accuracy).slice(0, 3),
-                quests: user.dailyQuests,
-                weeklyQuests: user.weeklyQuests,
-                user: user // Return full user object for profile info
-            } : {});
+                subjectBreakdown: subjStats,
+                strongestTopics: topicStats.map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 })).sort((a,b) => b.accuracy - a.accuracy).slice(0, 3),
+                weakestTopics: topicStats.map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 })).sort((a,b) => a.accuracy - b.accuracy).slice(0, 3),
+                quests: user.dailyQuests || [],
+                weeklyQuests: user.weeklyQuests || [],
+                user: user
+            });
         } else {
-            res.json({ points: 1250, totalExams: 15 });
+            // Fallback for brand new user not yet synced
+            res.json({ points: 0, totalExams: 0, quests: generateDailyQuests() });
         }
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
