@@ -15,7 +15,8 @@
     "express": "^4.19.2",
     "mongoose": "^8.2.1",
     "compression": "^1.7.4",
-    "apicache": "^1.6.3"
+    "apicache": "^1.6.3",
+    "express-rate-limit": "^7.1.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
