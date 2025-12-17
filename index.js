@@ -2,11 +2,15 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const compression = require('compression');
+const apicache = require('apicache');
 require('dotenv').config();
 
 const app = express();
+const cache = apicache.middleware;
 
 // Middleware
+app.use(compression()); // Gzip compression to reduce response body size
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
@@ -31,10 +35,11 @@ const memoryDb = {
   questionPapers: [] // NEW: Stores list of available question banks
 };
 
-// Connect to MongoDB
+// Connect to MongoDB with Pool Size Optimization
 mongoose.connect(MONGODB_URI, {
   serverSelectionTimeoutMS: 5000, 
   socketTimeoutMS: 45000,
+  maxPoolSize: 10 // Maintain up to 10 socket connections
 })
   .then(() => console.log('✅ Connected to MongoDB Atlas'))
   .catch(err => console.error('⚠️ MongoDB Connection Failed. Switching to In-Memory Fallback mode.'));
@@ -105,7 +110,7 @@ const questSchema = new mongoose.Schema({
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
-  uid: { type: String, required: true, unique: true },
+  uid: { type: String, required: true, unique: true, index: true }, // Indexed for fast login
   email: String,
   displayName: String,
   photoURL: String,
@@ -114,7 +119,7 @@ const userSchema = new mongoose.Schema({
   hscBatch: String,
   department: String,
   target: String,
-  points: { type: Number, default: 0 },
+  points: { type: Number, default: 0, index: -1 }, // Indexed for Leaderboard
   totalExams: { type: Number, default: 0 },
   lastLogin: { type: Number, default: Date.now },
   createdAt: { type: Number, default: Date.now },
@@ -141,7 +146,7 @@ const paymentSchema = new mongoose.Schema({
   amount: Number,
   trxId: { type: String, required: true },
   senderNumber: { type: String, required: true },
-  status: { type: String, default: 'PENDING', enum: ['PENDING', 'APPROVED', 'REJECTED'] },
+  status: { type: String, default: 'PENDING', enum: ['PENDING', 'APPROVED', 'REJECTED'], index: true }, // Indexed for Admin filtering
   timestamp: { type: Number, default: Date.now }
 });
 const Payment = mongoose.model('Payment', paymentSchema);
@@ -150,7 +155,7 @@ const notificationSchema = new mongoose.Schema({
   title: String,
   message: String,
   type: { type: String, enum: ['INFO', 'WARNING', 'SUCCESS', 'BATTLE_CHALLENGE', 'BATTLE_RESULT'] },
-  date: { type: Number, default: Date.now },
+  date: { type: Number, default: Date.now, index: -1 }, // Indexed for sorting
   target: { type: String, default: 'ALL' },
   actionLink: String,
   metadata: Object
@@ -185,19 +190,17 @@ const battleSchema = new mongoose.Schema({
 const Battle = mongoose.model('Battle', battleSchema);
 
 const questionBankSchema = new mongoose.Schema({
-  subject: { type: String, required: true },
-  chapter: { type: String, required: true },
+  subject: { type: String, required: true, index: true }, // Indexed
+  chapter: { type: String, required: true, index: true }, // Indexed
   topic: String,
   question: { type: String, required: true },
   options: { type: [String], required: true },
   correctAnswerIndex: { type: Number, required: true },
   explanation: String,
   difficulty: { type: String, default: 'MEDIUM' },
-  examRef: { type: String }, 
+  examRef: { type: String, index: true }, // Indexed for Past Paper Fetch
   createdAt: { type: Number, default: Date.now }
 });
-questionBankSchema.index({ subject: 1, chapter: 1, topic: 1 });
-questionBankSchema.index({ examRef: 1 });
 const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
 
 // NEW: Stores metadata about uploaded Question Banks (Papers)
@@ -212,16 +215,15 @@ const questionPaperSchema = new mongoose.Schema({
 const QuestionPaper = mongoose.model('QuestionPaper', questionPaperSchema);
 
 const savedQuestionSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
+  userId: { type: String, required: true, index: true }, // Indexed
   questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'QuestionBank' },
   folder: { type: String, default: 'General' },
   savedAt: { type: Number, default: Date.now }
 });
-savedQuestionSchema.index({ userId: 1 });
 const SavedQuestion = mongoose.model('SavedQuestion', savedQuestionSchema);
 
 const mistakeSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
+  userId: { type: String, required: true, index: true }, // Indexed
   question: { type: String, required: true },
   options: { type: [String], required: true },
   correctAnswerIndex: { type: Number, required: true },
@@ -232,11 +234,10 @@ const mistakeSchema = new mongoose.Schema({
   wrongCount: { type: Number, default: 1 },
   lastMissed: { type: Number, default: Date.now }
 });
-mistakeSchema.index({ userId: 1 });
 const Mistake = mongoose.model('Mistake', mistakeSchema);
 
 const examResultSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
+  userId: { type: String, required: true, index: true },
   subject: { type: String, required: true },
   totalQuestions: Number,
   correct: Number,
@@ -246,7 +247,6 @@ const examResultSchema = new mongoose.Schema({
   topicStats: [{ topic: String, correct: Number, total: Number }],
   timestamp: { type: Number, default: Date.now }
 });
-examResultSchema.index({ userId: 1 }); 
 const ExamResult = mongoose.model('ExamResult', examResultSchema);
 
 const examPackSchema = new mongoose.Schema({
@@ -417,18 +417,23 @@ app.get('/api/users/:userId/stats', async (req, res) => {
     try {
         let user;
         if (isDbConnected()) {
-            user = await User.findOne({ uid: req.params.userId });
+            // Lean query for speed
+            user = await User.findOne({ uid: req.params.userId }).lean();
+            
+            // Check for daily reset needed (Using Date logic manually since it's lean)
             if (user) {
-                // Check for daily reset on fetch
-                const updatedUser = await checkAndResetUserQuests(user);
-                if (updatedUser !== user) {
-                    await updatedUser.save();
-                    user = updatedUser;
-                }
+                 const now = new Date();
+                 const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+                 if (!user.lastQuestReset || user.lastQuestReset < todayStart) {
+                     // Need to update, so fetch document
+                     const docUser = await User.findOne({ uid: req.params.userId });
+                     const updatedUser = await checkAndResetUserQuests(docUser);
+                     await updatedUser.save();
+                     user = updatedUser.toObject();
+                 }
             }
         } else {
             user = memoryDb.users.find(u => u.uid === req.params.userId);
-            // Basic memory reset check
             if (user) {
                  const now = new Date();
                  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -441,22 +446,28 @@ app.get('/api/users/:userId/stats', async (req, res) => {
 
         if (user) {
             // Safe handling for Maps if using in-memory vs mongoose
-            const subjStats = user.stats.subjectStats instanceof Map 
-                ? Array.from(user.stats.subjectStats.entries()).map(([k,v]) => ({ subject: k, accuracy: v.total > 0 ? (v.correct/v.total)*100 : 0 }))
-                : []; // Handle differently if plain object in memory
+            // Mongoose Map becomes object in .lean() or toObject()
+            let subjStats = [];
+            if (user.stats && user.stats.subjectStats) {
+                // If it's a plain object (from lean/memory) or Map
+                const entries = user.stats.subjectStats instanceof Map ? Array.from(user.stats.subjectStats.entries()) : Object.entries(user.stats.subjectStats);
+                subjStats = entries.map(([k,v]) => ({ subject: k, accuracy: v.total > 0 ? (v.correct/v.total)*100 : 0 }));
+            }
             
-            const topicStats = user.stats.topicStats instanceof Map
-                ? Array.from(user.stats.topicStats.entries())
-                : [];
+            let topicStats = [];
+            if (user.stats && user.stats.topicStats) {
+                const entries = user.stats.topicStats instanceof Map ? Array.from(user.stats.topicStats.entries()) : Object.entries(user.stats.topicStats);
+                topicStats = entries.map(([k,v]) => ({ topic: k, accuracy: v.total > 0 ? (v.correct/v.total)*100 : 0 }));
+            }
 
             res.json({ 
                 points: user.points, 
                 totalExams: user.totalExams,
-                totalCorrect: user.stats.totalCorrect,
-                totalWrong: user.stats.totalWrong,
+                totalCorrect: user.stats?.totalCorrect || 0,
+                totalWrong: user.stats?.totalWrong || 0,
                 subjectBreakdown: subjStats,
-                strongestTopics: topicStats.map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 })).sort((a,b) => b.accuracy - a.accuracy).slice(0, 3),
-                weakestTopics: topicStats.map(([k,v]) => ({ topic: k, accuracy: (v.correct/v.total)*100 })).sort((a,b) => a.accuracy - b.accuracy).slice(0, 3),
+                strongestTopics: topicStats.sort((a,b) => b.accuracy - a.accuracy).slice(0, 3),
+                weakestTopics: topicStats.sort((a,b) => a.accuracy - b.accuracy).slice(0, 3),
                 quests: user.dailyQuests || [],
                 weeklyQuests: user.weeklyQuests || [],
                 user: user
@@ -589,7 +600,7 @@ app.delete('/api/users/:userId/saved-questions/by-q/:questionId', async (req, re
 app.get('/api/users/:userId/mistakes', async (req, res) => {
     try {
         if (isDbConnected()) {
-            const mistakes = await Mistake.find({ userId: req.params.userId }).sort({ lastMissed: -1 });
+            const mistakes = await Mistake.find({ userId: req.params.userId }).sort({ lastMissed: -1 }).limit(100);
             res.json(mistakes);
         } else {
             res.json(memoryDb.mistakes.filter(m => m.userId === req.params.userId));
@@ -665,8 +676,8 @@ app.delete('/api/admin/questions/:id', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// GET: List of Available Question Papers
-app.get('/api/question-papers', async (req, res) => {
+// GET: List of Available Question Papers - Cached
+app.get('/api/question-papers', cache('5 minutes'), async (req, res) => {
     try {
         if (isDbConnected()) {
             const papers = await QuestionPaper.find().sort({ year: -1 });
@@ -677,8 +688,8 @@ app.get('/api/question-papers', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// --- EXAM REF SPECIFIC ROUTE ---
-app.get('/api/quiz/past-paper/:examRef', async (req, res) => {
+// --- EXAM REF SPECIFIC ROUTE - Cached ---
+app.get('/api/quiz/past-paper/:examRef', cache('10 minutes'), async (req, res) => {
     try {
         const { examRef } = req.params;
         if (isDbConnected()) {
@@ -723,7 +734,7 @@ app.post('/api/quiz/generate-from-db', async (req, res) => {
     } catch (e) { res.status(500).json({error: e.message}); }
 });
 
-app.get('/api/quiz/syllabus-stats', async (req, res) => {
+app.get('/api/quiz/syllabus-stats', cache('10 minutes'), async (req, res) => {
     try {
         if (!isDbConnected()) return res.json({});
 
@@ -843,12 +854,12 @@ app.get('/api/admin/stats', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
-// --- LEADERBOARD ---
+// --- LEADERBOARD - Cached ---
 
-app.get('/api/leaderboard', async (req, res) => {
+app.get('/api/leaderboard', cache('1 minute'), async (req, res) => {
     try {
         if(isDbConnected()) {
-            const users = await User.find({}, 'uid displayName photoURL points college hscBatch target department').sort({ points: -1 }).limit(100);
+            const users = await User.find({}, 'uid displayName photoURL points college hscBatch target department').sort({ points: -1 }).limit(100).lean();
             res.json(users);
         } else {
             res.json([
@@ -884,7 +895,6 @@ app.post('/api/admin/notifications', async (req, res) => {
 });
 
 // --- EXAM PACKS ---
-// (Currently using static mock, but ready for DB)
 app.get('/api/exam-packs', async (req, res) => {
     if(isDbConnected()) {
         const packs = await ExamPack.find();
@@ -902,8 +912,7 @@ app.get('/api/exam-packs', async (req, res) => {
           features: ['সম্পূর্ণ সিলেবাসের ওপর পরীক্ষা', 'নেগেটিভ মার্কিং প্র্যাকটিস', 'মেডিকেল স্ট্যান্ডার্ড প্রশ্ন', 'সলভ শিট ও ব্যাখ্যা'],
           theme: 'emerald',
           tag: 'Best Seller'
-        },
-        // ... other mocks
+        }
     ]);
 });
 
