@@ -28,7 +28,8 @@ const memoryDb = {
   examResults: [],
   questTemplates: [], // Admin templates
   examPacks: [],
-  questionPapers: [] // NEW: Stores list of available question banks
+  questionPapers: [], // NEW: Stores list of available question banks
+  syllabus: [] // Added for dynamic syllabus management
 };
 
 // Connect to MongoDB
@@ -75,6 +76,16 @@ const generateDailyQuests = () => {
 };
 
 // --- Schemas & Models (Mongoose) ---
+
+// New Dynamic Syllabus Schema
+const syllabusSchema = new mongoose.Schema({
+  subject: { type: String, required: true, unique: true },
+  chapters: [{
+    name: { type: String, required: true },
+    topics: [mongoose.Schema.Types.Mixed] // Can be string or {title, subTopics}
+  }]
+});
+const Syllabus = mongoose.model('Syllabus', syllabusSchema);
 
 const questTemplateSchema = new mongoose.Schema({
   title: String,
@@ -266,6 +277,65 @@ const ExamPack = mongoose.model('ExamPack', examPackSchema);
 
 app.get('/', (req, res) => {
   res.send(`🚀 Dhrubok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
+});
+
+// --- SYLLABUS API (NEW) ---
+
+app.get('/api/syllabus', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const syllabus = await Syllabus.find().sort({ subject: 1 });
+            res.json(syllabus);
+        } else {
+            res.json(memoryDb.syllabus);
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/syllabus/sync', async (req, res) => {
+    try {
+        const { fullDb } = req.body; 
+        if (isDbConnected()) {
+            for (const subjectName of Object.keys(fullDb)) {
+                const subjectChapters = [];
+                for (const chapterName of Object.keys(fullDb[subjectName])) {
+                    subjectChapters.push({
+                        name: chapterName,
+                        topics: fullDb[subjectName][chapterName]
+                    });
+                }
+                await Syllabus.findOneAndUpdate(
+                    { subject: subjectName },
+                    { subject: subjectName, chapters: subjectChapters },
+                    { upsert: true }
+                );
+            }
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/syllabus/update', async (req, res) => {
+    try {
+        const { subject, chapters } = req.body;
+        if (isDbConnected()) {
+            await Syllabus.findOneAndUpdate(
+                { subject },
+                { subject, chapters },
+                { upsert: true, new: true }
+            );
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/syllabus/:id', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            await Syllabus.findByIdAndDelete(req.params.id);
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- QUESTS ---
@@ -903,7 +973,6 @@ app.get('/api/exam-packs', async (req, res) => {
           theme: 'emerald',
           tag: 'Best Seller'
         },
-        // ... other mocks
     ]);
 });
 
