@@ -1,3 +1,4 @@
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -25,9 +26,9 @@ const memoryDb = {
   savedQuestions: [],
   mistakes: [],
   examResults: [],
-  questTemplates: [],
+  questTemplates: [], // Admin templates
   examPacks: [],
-  questionPapers: []
+  questionPapers: [] // NEW: Stores list of available question banks
 };
 
 // Connect to MongoDB
@@ -54,8 +55,10 @@ const QUEST_TYPES = [
 ];
 
 const generateDailyQuests = () => {
+    // Shuffle and pick 3 random quests
     const shuffled = [...QUEST_TYPES].sort(() => 0.5 - Math.random());
     const selected = shuffled.slice(0, 3);
+    
     return selected.map((q, idx) => ({
         id: `dq_${Date.now()}_${idx}`,
         title: q.title,
@@ -190,18 +193,24 @@ const questionBankSchema = new mongoose.Schema({
   correctAnswerIndex: { type: Number, required: true },
   explanation: String,
   difficulty: { type: String, default: 'MEDIUM' },
-  examRef: { type: String }, 
+  examRef: { type: String },
+  questionImage: { type: String },
+  explanationImage: { type: String },
+  optionsImages: { type: [String] },
   createdAt: { type: Number, default: Date.now }
 });
 questionBankSchema.index({ subject: 1, chapter: 1, topic: 1 });
 questionBankSchema.index({ examRef: 1 });
+// Text index for searching
+questionBankSchema.index({ question: 'text', explanation: 'text' }); 
 const QuestionBank = mongoose.model('QuestionBank', questionBankSchema);
 
+// NEW: Stores metadata about uploaded Question Banks (Papers)
 const questionPaperSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
+  id: { type: String, required: true, unique: true }, // e.g. medical_23_24
   title: { type: String, required: true },
   year: { type: String, required: true },
-  source: { type: String, required: true }, 
+  source: { type: String, required: true }, // Medical, Engineering, etc.
   totalQuestions: { type: Number, default: 0 },
   time: { type: Number, default: 60 }
 });
@@ -548,7 +557,144 @@ app.get('/api/quiz/syllabus-stats', async (req, res) => {
     }
 });
 
-// --- OTHER ROUTES REMAIND UNCHANGED ---
+// --- QUESTION BANK ADMIN ---
+
+// GET: All Questions (Admin Viewer with Search)
+app.get('/api/admin/questions', async (req, res) => {
+    try {
+        const { page = 1, limit = 10, subject, chapter, search } = req.query;
+        const query = {};
+        if(subject && subject !== 'ALL') query.subject = subject;
+        if(chapter && chapter !== 'ALL') query.chapter = chapter;
+        
+        if (search) {
+            query.$or = [
+                { question: { $regex: search, $options: 'i' } },
+                { explanation: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        if(isDbConnected()) {
+            const questions = await QuestionBank.find(query).skip((page-1)*limit).limit(Number(limit)).sort({createdAt: -1});
+            const total = await QuestionBank.countDocuments(query);
+            res.json({ questions, total });
+        } else {
+            // Memory Fallback Search
+            let qs = memoryDb.questions;
+            if (subject && subject !== 'ALL') qs = qs.filter(q => q.subject === subject);
+            if (chapter && chapter !== 'ALL') qs = qs.filter(q => q.chapter === chapter);
+            if (search) {
+                const lowerSearch = search.toLowerCase();
+                qs = qs.filter(q => q.question.toLowerCase().includes(lowerSearch));
+            }
+            res.json({ questions: qs.slice((page-1)*limit, page*limit), total: qs.length });
+        }
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// POST: Bulk Upload
+app.post('/api/admin/questions/bulk', async (req, res) => {
+    try {
+        const { questions, metadata } = req.body;
+        
+        if(isDbConnected()) {
+            await QuestionBank.insertMany(questions);
+            if (metadata) {
+                await QuestionPaper.findOneAndUpdate(
+                    { id: metadata.id },
+                    metadata,
+                    { upsert: true, new: true }
+                );
+            }
+        } else {
+            questions.forEach(q => memoryDb.questions.push({...q, _id: Date.now() + Math.random()}));
+            if (metadata) {
+                const existingIdx = memoryDb.questionPapers.findIndex(p => p.id === metadata.id);
+                if (existingIdx >= 0) memoryDb.questionPapers[existingIdx] = metadata;
+                else memoryDb.questionPapers.push(metadata);
+            }
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// PUT: Update Question (NEW)
+app.put('/api/admin/questions/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData = req.body;
+        
+        if (isDbConnected()) {
+            const updated = await QuestionBank.findByIdAndUpdate(id, updateData, { new: true });
+            res.json({ success: true, question: updated });
+        } else {
+            const index = memoryDb.questions.findIndex(q => q._id.toString() === id);
+            if (index !== -1) {
+                memoryDb.questions[index] = { ...memoryDb.questions[index], ...updateData };
+                res.json({ success: true, question: memoryDb.questions[index] });
+            } else {
+                res.status(404).json({ error: "Question not found in memory" });
+            }
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// DELETE: Delete Question
+app.delete('/api/admin/questions/:id', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            await QuestionBank.findByIdAndDelete(req.params.id);
+        } else {
+            memoryDb.questions = memoryDb.questions.filter(q => q._id.toString() !== req.params.id);
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/question-papers', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const papers = await QuestionPaper.find().sort({ year: -1 });
+            res.json(papers);
+        } else { res.json(memoryDb.questionPapers); }
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/quiz/past-paper/:examRef', async (req, res) => {
+    try {
+        const { examRef } = req.params;
+        if (isDbConnected()) {
+            const questions = await QuestionBank.find({ examRef });
+            res.json(questions);
+        } else {
+            const questions = memoryDb.questions.filter(q => q.examRef === examRef);
+            res.json(questions);
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/quiz/generate-from-db', async (req, res) => {
+    try {
+        const { subject, chapter, topics, count } = req.body;
+        if (isDbConnected()) {
+            const pipeline = [
+                { $match: { subject, chapter: chapter === 'Full Syllabus' ? { $exists: true } : chapter, ...(topics && topics.length > 0 && topics[0] !== 'Full Syllabus' ? { topic: { $in: topics } } : {}) }},
+                { $sample: { size: count } }
+            ];
+            const questions = await QuestionBank.aggregate(pipeline);
+            res.json(questions);
+        } else {
+            const filtered = memoryDb.questions.filter(q => q.subject === subject && (chapter === 'Full Syllabus' || q.chapter === chapter));
+            const shuffled = filtered.sort(() => 0.5 - Math.random()).slice(0, count);
+            res.json(shuffled);
+        }
+    } catch (e) { res.status(500).json({error: e.message}); }
+});
+
+// --- OTHER ROUTES ---
+
 app.get('/api/users/:userId/enrollments', async (req, res) => {
     try {
         const { userId } = req.params;
@@ -622,89 +768,6 @@ app.delete('/api/users/:userId/mistakes/:id', async (req, res) => {
     } catch (e) { res.status(500).json({error: e.message}); }
 });
 
-app.get('/api/admin/questions', async (req, res) => {
-    try {
-        const { page = 1, limit = 10, subject, chapter } = req.query;
-        const query = {};
-        if(subject) query.subject = subject;
-        if(chapter) query.chapter = chapter;
-        if(isDbConnected()) {
-            const questions = await QuestionBank.find(query).skip((page-1)*limit).limit(Number(limit)).sort({createdAt: -1});
-            const total = await QuestionBank.countDocuments(query);
-            res.json({ questions, total });
-        } else {
-            const qs = memoryDb.questions.filter(q => (!subject || q.subject === subject) && (!chapter || q.chapter === chapter));
-            res.json({ questions: qs.slice((page-1)*limit, page*limit), total: qs.length });
-        }
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.post('/api/admin/questions/bulk', async (req, res) => {
-    try {
-        const { questions, metadata } = req.body;
-        if(isDbConnected()) {
-            await QuestionBank.insertMany(questions);
-            if (metadata) { await QuestionPaper.findOneAndUpdate({ id: metadata.id }, metadata, { upsert: true, new: true }); }
-        } else {
-            questions.forEach(q => memoryDb.questions.push({...q, _id: (Date.now() + Math.random()).toString()}));
-            if (metadata) {
-                const existingIdx = memoryDb.questionPapers.findIndex(p => p.id === metadata.id);
-                if (existingIdx >= 0) memoryDb.questionPapers[existingIdx] = metadata;
-                else memoryDb.questionPapers.push(metadata);
-            }
-        }
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.delete('/api/admin/questions/:id', async (req, res) => {
-    try {
-        if(isDbConnected()) { await QuestionBank.findByIdAndDelete(req.params.id); }
-        else { memoryDb.questions = memoryDb.questions.filter(q => q._id !== req.params.id); }
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.get('/api/question-papers', async (req, res) => {
-    try {
-        if (isDbConnected()) {
-            const papers = await QuestionPaper.find().sort({ year: -1 });
-            res.json(papers);
-        } else { res.json(memoryDb.questionPapers); }
-    } catch(e) { res.status(500).json({error: e.message}); }
-});
-
-app.get('/api/quiz/past-paper/:examRef', async (req, res) => {
-    try {
-        const { examRef } = req.params;
-        if (isDbConnected()) {
-            const questions = await QuestionBank.find({ examRef });
-            res.json(questions);
-        } else {
-            const questions = memoryDb.questions.filter(q => q.examRef === examRef);
-            res.json(questions);
-        }
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/quiz/generate-from-db', async (req, res) => {
-    try {
-        const { subject, chapter, topics, count } = req.body;
-        if (isDbConnected()) {
-            const pipeline = [
-                { $match: { subject, chapter: chapter === 'Full Syllabus' ? { $exists: true } : chapter, ...(topics && topics.length > 0 && topics[0] !== 'Full Syllabus' ? { topic: { $in: topics } } : {}) }},
-                { $sample: { size: count } }
-            ];
-            const questions = await QuestionBank.aggregate(pipeline);
-            res.json(questions);
-        } else {
-            const filtered = memoryDb.questions.filter(q => q.subject === subject && (chapter === 'Full Syllabus' || q.chapter === chapter));
-            const shuffled = filtered.sort(() => 0.5 - Math.random()).slice(0, count);
-            res.json(shuffled);
-        }
-    } catch (e) { res.status(500).json({error: e.message}); }
-});
-
 app.get('/api/admin/payments', async (req, res) => {
     try {
         if(isDbConnected()) {
@@ -764,6 +827,28 @@ app.post('/api/admin/notifications', async (req, res) => {
         res.json({ success: true });
     } catch(e) { res.status(500).json({error: e.message}); }
 });
+
+// --- BATTLE API ---
+
+app.post('/api/battles/create', (req, res) => { res.json({ roomId: '123456' }) });
+app.post('/api/battles/join', (req, res) => { res.json({ success: true }) });
+app.post('/api/battles/start', (req, res) => { res.json({ success: true }) });
+app.post('/api/battles/:roomId/answer', (req, res) => { res.json({ success: true }) });
+app.get('/api/battles/:roomId', (req, res) => { res.json({ 
+    roomId: req.params.roomId,
+    hostId: 'mock-host',
+    status: 'ACTIVE',
+    startTime: Date.now() - 10000,
+    config: { timePerQuestion: 20, subjects: ['Physics'], chapters: ['Vector'] },
+    questions: [
+        { question: "Mock Q1: 2+2?", options: ["3","4","5","6"], correctAnswerIndex: 1 },
+        { question: "Mock Q2: Capital of BD?", options: ["Dhaka","Ctg","Sylhet","Raj"], correctAnswerIndex: 0 }
+    ],
+    players: [
+        { uid: 'mock-host', name: 'Host', score: 20, avatar: '', totalTimeTaken: 5, answers: { '0': 1, '1': 0 } },
+        { uid: 'you', name: 'You', score: 10, avatar: '', totalTimeTaken: 8, answers: { '0': 1 } }
+    ]
+}) });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
