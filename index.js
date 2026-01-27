@@ -36,22 +36,22 @@ mongoose.connect(MONGODB_URI, {
   serverSelectionTimeoutMS: 5000, 
   socketTimeoutMS: 45000,
 })
-  .then(() => console.log('✅ Connected to MongoDB Atlas'))
-  .catch(err => console.error('⚠️ MongoDB Connection Failed. Switching to In-Memory Fallback mode.'));
+  .then(() => console.log('âœ… Connected to MongoDB Atlas'))
+  .catch(err => console.error('âš ï¸ MongoDB Connection Failed. Switching to In-Memory Fallback mode.'));
 
 // Helper to check DB status
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
 // --- UTILS: QUEST GENERATOR ---
 const QUEST_TYPES = [
-    { type: 'EXAM_COMPLETE', title: 'মডেল টেস্ট হিরো', desc: '১টি মডেল টেস্ট সম্পন্ন করো', target: 1, reward: 50, icon: 'FileCheck' },
-    { type: 'EXAM_COMPLETE', title: 'এক্সাম ম্যারাথন', desc: '৩টি মডেল টেস্ট সম্পন্ন করো', target: 3, reward: 100, icon: 'FileCheck' },
-    { type: 'HIGH_SCORE', title: 'পারফেকশনিস্ট', desc: '১টি পরীক্ষায় ৮০% নম্বর পাও', target: 1, reward: 80, icon: 'Target' },
-    { type: 'STUDY_TIME', title: 'পড়ুয়া', desc: '২০ মিনিট পড়াশোনা ট্র্যাক করো', target: 20, reward: 60, icon: 'Clock' },
-    { type: 'PLAY_BATTLE', title: 'ব্যাটল ওয়ারিয়র', desc: '১টি কুইজ ব্যাটল খেলো', target: 1, reward: 50, icon: 'Swords' },
-    { type: 'WIN_BATTLE', title: 'বিজয় উল্লাস', desc: '১টি কুইজ ব্যাটল জেতো', target: 1, reward: 100, icon: 'Trophy' },
-    { type: 'ASK_AI', title: 'কৌতুহলী', desc: 'AI কে ২ বার প্রশ্ন করো', target: 2, reward: 40, icon: 'Bot' },
-    { type: 'SAVE_QUESTION', title: 'সংগ্রাহক', desc: '৩টি প্রশ্ন সেভ করো', target: 3, reward: 30, icon: 'Bookmark' }
+    { type: 'EXAM_COMPLETE', title: 'à¦®à¦¡à§‡à¦² à¦Ÿà§‡à¦¸à§à¦Ÿ à¦¹à¦¿à¦°à§‹', desc: 'à§§à¦Ÿà¦¿ à¦®à¦¡à§‡à¦² à¦Ÿà§‡à¦¸à§à¦Ÿ à¦¸à¦®à§à¦ªà¦¨à§à¦¨ à¦•à¦°à§‹', target: 1, reward: 50, icon: 'FileCheck' },
+    { type: 'EXAM_COMPLETE', title: 'à¦à¦•à§à¦¸à¦¾à¦® à¦®à§à¦¯à¦¾à¦°à¦¾à¦¥à¦¨', desc: 'à§©à¦Ÿà¦¿ à¦®à¦¡à§‡à¦² à¦Ÿà§‡à¦¸à§à¦Ÿ à¦¸à¦®à§à¦ªà¦¨à§à¦¨ à¦•à¦°à§‹', target: 3, reward: 100, icon: 'FileCheck' },
+    { type: 'HIGH_SCORE', title: 'à¦ªà¦¾à¦°à¦«à§‡à¦•à¦¶à¦¨à¦¿à¦¸à§à¦Ÿ', desc: 'à§§à¦Ÿà¦¿ à¦ªà¦°à§€à¦•à§à¦·à¦¾à§Ÿ à§®à§¦% à¦¨à¦®à§à¦¬à¦° à¦ªà¦¾à¦“', target: 1, reward: 80, icon: 'Target' },
+    { type: 'STUDY_TIME', title: 'à¦ªà§œà§à§Ÿà¦¾', desc: 'à§¨à§¦ à¦®à¦¿à¦¨à¦¿à¦Ÿ à¦ªà§œà¦¾à¦¶à§‹à¦¨à¦¾ à¦Ÿà§à¦°à§à¦¯à¦¾à¦• à¦•à¦°à§‹', target: 20, reward: 60, icon: 'Clock' },
+    { type: 'PLAY_BATTLE', title: 'à¦¬à§à¦¯à¦¾à¦Ÿà¦² à¦“à§Ÿà¦¾à¦°à¦¿à§Ÿà¦°', desc: 'à§§à¦Ÿà¦¿ à¦•à§à¦‡à¦œ à¦¬à§à¦¯à¦¾à¦Ÿà¦² à¦–à§‡à¦²à§‹', target: 1, reward: 50, icon: 'Swords' },
+    { type: 'WIN_BATTLE', title: 'à¦¬à¦¿à¦œà§Ÿ à¦‰à¦²à§à¦²à¦¾à¦¸', desc: 'à§§à¦Ÿà¦¿ à¦•à§à¦‡à¦œ à¦¬à§à¦¯à¦¾à¦Ÿà¦² à¦œà§‡à¦¤à§‹', target: 1, reward: 100, icon: 'Trophy' },
+    { type: 'ASK_AI', title: 'à¦•à§Œà¦¤à§à¦¹à¦²à§€', desc: 'AI à¦•à§‡ à§¨ à¦¬à¦¾à¦° à¦ªà§à¦°à¦¶à§à¦¨ à¦•à¦°à§‹', target: 2, reward: 40, icon: 'Bot' },
+    { type: 'SAVE_QUESTION', title: 'à¦¸à¦‚à¦—à§à¦°à¦¾à¦¹à¦•', desc: 'à§©à¦Ÿà¦¿ à¦ªà§à¦°à¦¶à§à¦¨ à¦¸à§‡à¦­ à¦•à¦°à§‹', target: 3, reward: 30, icon: 'Bookmark' }
 ];
 
 const generateDailyQuests = () => {
@@ -270,7 +270,7 @@ const ExamPack = mongoose.model('ExamPack', examPackSchema);
 // --- ROUTES ---
 
 app.get('/', (req, res) => {
-  res.send(`🚀 Dhrubok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
+  res.send(`ðŸš€ Dhrubok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
 });
 
 // --- ADMIN STATS AGGREGATION ---
@@ -599,19 +599,38 @@ app.post('/api/admin/questions/bulk', async (req, res) => {
         
         if(isDbConnected()) {
             await QuestionBank.insertMany(questions);
+            
             if (metadata) {
+                // FIX: Instead of blindly updating with metadata.totalQuestions (which is just the batch size),
+                // we count the actual total questions in the DB for this examRef.
+                const realTotalCount = await QuestionBank.countDocuments({ examRef: metadata.id });
+
                 await QuestionPaper.findOneAndUpdate(
                     { id: metadata.id },
-                    metadata,
+                    { 
+                        ...metadata,
+                        totalQuestions: realTotalCount // Update with the actual cumulative count
+                    },
                     { upsert: true, new: true }
                 );
             }
         } else {
+            // Memory Fallback Logic
             questions.forEach(q => memoryDb.questions.push({...q, _id: Date.now() + Math.random()}));
+            
             if (metadata) {
                 const existingIdx = memoryDb.questionPapers.findIndex(p => p.id === metadata.id);
-                if (existingIdx >= 0) memoryDb.questionPapers[existingIdx] = metadata;
-                else memoryDb.questionPapers.push(metadata);
+                if (existingIdx >= 0) {
+                    // If paper exists, update details and increment count
+                    const existingPaper = memoryDb.questionPapers[existingIdx];
+                    memoryDb.questionPapers[existingIdx] = {
+                        ...metadata,
+                        totalQuestions: (existingPaper.totalQuestions || 0) + questions.length
+                    };
+                } else {
+                    // New paper
+                    memoryDb.questionPapers.push(metadata);
+                }
             }
         }
         res.json({ success: true });
@@ -825,6 +844,44 @@ app.post('/api/admin/notifications', async (req, res) => {
         if(isDbConnected()) { await Notification.create(req.body); }
         else { memoryDb.notifications.unshift({ ...req.body, _id: Date.now().toString(), date: Date.now() }); }
         res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/exam-packs', async (req, res) => {
+    try {
+        if(isDbConnected()) {
+            const packs = await ExamPack.find();
+            res.json(packs);
+        } else {
+            // Static fallback if empty or memory mode
+            if (memoryDb.examPacks.length === 0) {
+                 memoryDb.examPacks = [
+                    {
+                        id: "medical-final",
+                        title: "Medical Final Model Test",
+                        subtitle: "à¦¶à§‡à¦· à¦®à§à¦¹à§‚à¦°à§à¦¤à§‡à¦° à¦¸à§‡à¦°à¦¾ à¦ªà§à¦°à¦¸à§à¦¤à§à¦¤à¦¿",
+                        price: 500,
+                        originalPrice: 1000,
+                        totalExams: 10,
+                        features: ["à¦¸à¦®à§à¦ªà§‚à¦°à§à¦£ à¦¸à¦¿à¦²à§‡à¦¬à¦¾à¦¸", "à¦¨à§‡à¦—à§‡à¦Ÿà¦¿à¦­ à¦®à¦¾à¦°à§à¦•à¦¿à¦‚", "à¦¬à§à¦¯à¦¾à¦–à§à¦¯à¦¾à¦¸à¦¹ à¦¸à¦®à¦¾à¦§à¦¾à¦¨"],
+                        theme: "emerald",
+                        tag: "BEST SELLER"
+                    },
+                    {
+                        id: "eng-guccho",
+                        title: "Engineering Guccho Pack",
+                        subtitle: "CKRUET à¦¸à§à¦ªà§‡à¦¶à¦¾à¦²",
+                        price: 600,
+                        originalPrice: 1200,
+                        totalExams: 8,
+                        features: ["à¦‡à¦žà§à¦œà¦¿à¦¨à¦¿à§Ÿà¦¾à¦°à¦¿à¦‚ à¦¸à§à¦Ÿà§à¦¯à¦¾à¦¨à§à¦¡à¦¾à¦°à§à¦¡", "à¦•à¦ à¦¿à¦¨ à¦ªà§à¦°à¦¶à§à¦¨", "à¦²à¦¿à¦¡à¦¾à¦°à¦¬à§‹à¦°à§à¦¡"],
+                        theme: "blue",
+                        tag: "PREMIUM"
+                    }
+                ];
+            }
+            res.json(memoryDb.examPacks);
+        }
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
