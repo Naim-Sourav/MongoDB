@@ -675,10 +675,41 @@ app.delete('/api/admin/questions/:id', async (req, res) => {
 app.get('/api/question-papers', async (req, res) => {
     try {
         if (isDbConnected()) {
-            const papers = await QuestionPaper.find().sort({ year: -1 });
+            // 1. Get all papers metadata
+            // Use .lean() to get plain JS objects we can modify
+            let papers = await QuestionPaper.find().sort({ year: -1 }).lean();
+
+            // 2. Get actual counts from QuestionBank to ensure synchronization
+            // This fixes the issue where metadata count lags behind actual uploads
+            const counts = await QuestionBank.aggregate([
+                { $group: { _id: "$examRef", total: { $sum: 1 } } }
+            ]);
+
+            // 3. Create a map for fast lookup
+            const countMap = {};
+            counts.forEach(c => {
+                if (c._id) countMap[c._id] = c.total;
+            });
+
+            // 4. Update counts in the response
+            papers = papers.map(p => ({
+                ...p,
+                totalQuestions: countMap[p.id] || p.totalQuestions || 0 
+            }));
+
             res.json(papers);
-        } else { res.json(memoryDb.questionPapers); }
-    } catch(e) { res.status(500).json({error: e.message}); }
+        } else {
+            // Memory Fallback: Calculate counts dynamically
+            const papers = memoryDb.questionPapers.map(p => {
+                const count = memoryDb.questions.filter(q => q.examRef === p.id).length;
+                return { ...p, totalQuestions: count };
+            });
+            res.json(papers);
+        }
+    } catch(e) { 
+        console.error("Error fetching papers:", e);
+        res.status(500).json({error: e.message}); 
+    }
 });
 
 app.get('/api/quiz/past-paper/:examRef', async (req, res) => {
