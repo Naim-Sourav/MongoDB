@@ -672,37 +672,50 @@ app.delete('/api/admin/questions/:id', async (req, res) => {
     } catch(e) { res.status(500).json({error: e.message}); }
 });
 
+// GET: Question Papers (Updated with Dynamic Subject Detection)
 app.get('/api/question-papers', async (req, res) => {
     try {
         if (isDbConnected()) {
             // 1. Get all papers metadata
-            // Use .lean() to get plain JS objects we can modify
             let papers = await QuestionPaper.find().sort({ year: -1 }).lean();
 
-            // 2. Get actual counts from QuestionBank to ensure synchronization
-            // This fixes the issue where metadata count lags behind actual uploads
+            // 2. Aggregate Question Counts
             const counts = await QuestionBank.aggregate([
                 { $group: { _id: "$examRef", total: { $sum: 1 } } }
             ]);
 
-            // 3. Create a map for fast lookup
+            // 3. Aggregate Unique Subjects per Paper (This is the new part)
+            const subjectAgg = await QuestionBank.aggregate([
+                { $group: { _id: { examRef: "$examRef", subject: "$subject" } } },
+                { $group: { _id: "$_id.examRef", subjects: { $push: "$_id.subject" } } }
+            ]);
+
+            // Create Maps for fast lookup
             const countMap = {};
             counts.forEach(c => {
                 if (c._id) countMap[c._id] = c.total;
             });
 
-            // 4. Update counts in the response
+            const subjectMap = {};
+            subjectAgg.forEach(s => {
+                if (s._id) subjectMap[s._id] = s.subjects;
+            });
+
+            // 4. Merge data
             papers = papers.map(p => ({
                 ...p,
-                totalQuestions: countMap[p.id] || p.totalQuestions || 0 
+                totalQuestions: countMap[p.id] || p.totalQuestions || 0,
+                subjects: subjectMap[p.id] || [] // Attach the detected subjects
             }));
 
             res.json(papers);
         } else {
-            // Memory Fallback: Calculate counts dynamically
+            // Memory Fallback
             const papers = memoryDb.questionPapers.map(p => {
-                const count = memoryDb.questions.filter(q => q.examRef === p.id).length;
-                return { ...p, totalQuestions: count };
+                const relatedQuestions = memoryDb.questions.filter(q => q.examRef === p.id);
+                const count = relatedQuestions.length;
+                const subjects = [...new Set(relatedQuestions.map(q => q.subject))]; // Unique subjects
+                return { ...p, totalQuestions: count, subjects };
             });
             res.json(papers);
         }
