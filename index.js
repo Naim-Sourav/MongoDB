@@ -227,15 +227,10 @@ const savedQuestionSchema = new mongoose.Schema({
 savedQuestionSchema.index({ userId: 1 });
 const SavedQuestion = mongoose.model('SavedQuestion', savedQuestionSchema);
 
+// OPTIMIZED MISTAKE SCHEMA: Now uses reference instead of full copy
 const mistakeSchema = new mongoose.Schema({
   userId: { type: String, required: true },
-  question: { type: String, required: true },
-  options: { type: [String], required: true },
-  correctAnswerIndex: { type: Number, required: true },
-  explanation: String,
-  subject: String,
-  chapter: String,
-  topic: String,
+  questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'QuestionBank', required: true },
   wrongCount: { type: Number, default: 1 },
   lastMissed: { type: Number, default: Date.now }
 });
@@ -616,17 +611,20 @@ app.post('/api/users/:userId/exam-results', async (req, res) => {
                 });
                 await user.save();
             }
+            
+            // Efficient Mistake Tracking: Use Reference
             if (resultData.mistakes && resultData.mistakes.length > 0) {
                 for (const m of resultData.mistakes) {
-                    await Mistake.findOneAndUpdate(
-                        { userId, question: m.question },
-                        { 
-                            $setOnInsert: { options: m.options, correctAnswerIndex: m.correctAnswerIndex, explanation: m.explanation, subject: m.subject, chapter: m.chapter, topic: m.topic },
-                            $inc: { wrongCount: 1 },
-                            $set: { lastMissed: Date.now() }
-                        },
-                        { upsert: true }
-                    );
+                    if (m._id) { // Only track if question exists in DB
+                        await Mistake.findOneAndUpdate(
+                            { userId, questionId: m._id },
+                            { 
+                                $inc: { wrongCount: 1 },
+                                $set: { lastMissed: Date.now() }
+                            },
+                            { upsert: true }
+                        );
+                    }
                 }
             }
         }
@@ -936,8 +934,9 @@ app.delete('/api/users/:userId/saved-questions/by-q/:questionId', async (req, re
 app.get('/api/users/:userId/mistakes', async (req, res) => {
     try {
         if (isDbConnected()) {
-            const mistakes = await Mistake.find({ userId: req.params.userId }).sort({ lastMissed: -1 });
-            res.json(mistakes);
+            const mistakes = await Mistake.find({ userId: req.params.userId }).populate('questionId').sort({ lastMissed: -1 });
+            // Filter out any where questionId might be null (e.g. deleted questions)
+            res.json(mistakes.filter(m => m.questionId));
         } else { res.json(memoryDb.mistakes.filter(m => m.userId === req.params.userId)); }
     } catch (e) { res.status(500).json({error: e.message}); }
 });
