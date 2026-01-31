@@ -28,7 +28,9 @@ const memoryDb = {
   examResults: [],
   questTemplates: [], // Admin templates
   examPacks: [],
-  questionPapers: [] // NEW: Stores list of available question banks
+  questionPapers: [], // NEW: Stores list of available question banks
+  studySessions: [], // NEW: Study Planner Sessions
+  studyTargets: []   // NEW: Study Planner Targets
 };
 
 // Connect to MongoDB
@@ -267,11 +269,128 @@ const examPackSchema = new mongoose.Schema({
 });
 const ExamPack = mongoose.model('ExamPack', examPackSchema);
 
+// --- NEW SCHEMAS FOR STUDY TRACKER ---
+const studySessionSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  subject: { type: String, required: true },
+  duration: { type: Number, required: true }, // in seconds
+  timestamp: { type: Number, default: Date.now }
+});
+studySessionSchema.index({ userId: 1 });
+const StudySession = mongoose.model('StudySession', studySessionSchema);
+
+const studyTargetSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  title: String,
+  subject: String,
+  type: { type: String, enum: ['TIME', 'CHAPTER'] },
+  targetValue: Number,
+  currentValue: { type: Number, default: 0 },
+  deadline: String, // ISO date string
+  completed: { type: Boolean, default: false },
+  createdAt: { type: Number, default: Date.now }
+});
+studyTargetSchema.index({ userId: 1 });
+const StudyTarget = mongoose.model('StudyTarget', studyTargetSchema);
+
 // --- ROUTES ---
 
 app.get('/', (req, res) => {
   res.send(`ðŸš€ Dhrubok API Running! Mode: ${isDbConnected() ? 'MongoDB' : 'Memory'}`);
 });
+
+// --- STUDY TRACKER API ROUTES ---
+
+// Get all study sessions for a user
+app.get('/api/study/sessions/:userId', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const sessions = await StudySession.find({ userId: req.params.userId }).sort({ timestamp: -1 });
+            res.json(sessions);
+        } else {
+            res.json(memoryDb.studySessions.filter(s => s.userId === req.params.userId).sort((a,b) => b.timestamp - a.timestamp));
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Create a new study session
+app.post('/api/study/sessions', async (req, res) => {
+    try {
+        const { userId, subject, duration, timestamp } = req.body;
+        if (isDbConnected()) {
+            const session = await StudySession.create({ userId, subject, duration, timestamp });
+            res.json(session);
+        } else {
+            const session = { _id: Date.now().toString(), userId, subject, duration, timestamp };
+            memoryDb.studySessions.push(session);
+            res.json(session);
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get all targets for a user
+app.get('/api/study/targets/:userId', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const targets = await StudyTarget.find({ userId: req.params.userId }).sort({ createdAt: -1 });
+            res.json(targets);
+        } else {
+            res.json(memoryDb.studyTargets.filter(t => t.userId === req.params.userId));
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Create a new target
+app.post('/api/study/targets', async (req, res) => {
+    try {
+        const targetData = req.body;
+        if (isDbConnected()) {
+            const target = await StudyTarget.create(targetData);
+            res.json(target);
+        } else {
+            const target = { _id: Date.now().toString(), ...targetData, createdAt: Date.now() };
+            memoryDb.studyTargets.push(target);
+            res.json(target);
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update target progress
+app.patch('/api/study/targets/:id', async (req, res) => {
+    try {
+        const { currentValue, completed } = req.body;
+        if (isDbConnected()) {
+            const target = await StudyTarget.findByIdAndUpdate(
+                req.params.id, 
+                { currentValue, completed }, 
+                { new: true }
+            );
+            res.json(target);
+        } else {
+            const target = memoryDb.studyTargets.find(t => t._id === req.params.id);
+            if (target) {
+                target.currentValue = currentValue;
+                target.completed = completed;
+                res.json(target);
+            } else {
+                res.status(404).json({ error: "Target not found" });
+            }
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Delete target
+app.delete('/api/study/targets/:id', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            await StudyTarget.findByIdAndDelete(req.params.id);
+        } else {
+            memoryDb.studyTargets = memoryDb.studyTargets.filter(t => t._id !== req.params.id);
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 
 // --- ADMIN STATS AGGREGATION ---
 app.get('/api/admin/stats', async (req, res) => {
