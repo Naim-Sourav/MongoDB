@@ -224,7 +224,7 @@ const savedQuestionSchema = new mongoose.Schema({
   folder: { type: String, default: 'General' },
   savedAt: { type: Number, default: Date.now }
 });
-savedQuestionSchema.index({ userId: 1 });
+savedQuestionSchema.index({ userId: 1, questionId: 1 }, { unique: true }); // Prevent duplicates in MongoDB
 const SavedQuestion = mongoose.model('SavedQuestion', savedQuestionSchema);
 
 // OPTIMIZED MISTAKE SCHEMA: Now uses reference instead of full copy
@@ -893,17 +893,38 @@ app.get('/api/users/:userId/enrollments', async (req, res) => {
 app.get('/api/users/:userId/saved-questions', async (req, res) => {
     try {
         if (isDbConnected()) {
-            const saved = await SavedQuestion.find({ userId: req.params.userId }).populate('questionId');
+            const saved = await SavedQuestion.find({ userId: req.params.userId }).populate('questionId').sort({ savedAt: -1 });
             res.json(saved.filter(s => s.questionId));
-        } else { res.json(memoryDb.savedQuestions.filter(s => s.userId === req.params.userId)); }
+        } else { 
+            const saved = memoryDb.savedQuestions.filter(s => s.userId === req.params.userId).sort((a,b) => b.savedAt - a.savedAt);
+            res.json(saved); 
+        }
     } catch (e) { res.status(500).json({error: e.message}); }
 });
 
 app.post('/api/users/:userId/saved-questions', async (req, res) => {
     try {
         const { questionId, folder } = req.body;
-        if (isDbConnected()) { await SavedQuestion.create({ userId: req.params.userId, questionId, folder }); }
-        else { memoryDb.savedQuestions.push({ _id: Date.now().toString(), userId: req.params.userId, questionId, folder }); }
+        const userId = req.params.userId;
+
+        if (isDbConnected()) { 
+            // Use findOneAndUpdate with upsert to create or update if exists, updating savedAt to bring to top
+            await SavedQuestion.findOneAndUpdate(
+                { userId, questionId },
+                { folder, savedAt: Date.now() },
+                { upsert: true, new: true }
+            );
+        } else { 
+            const existingIdx = memoryDb.savedQuestions.findIndex(s => s.userId === userId && s.questionId === questionId);
+            if (existingIdx !== -1) {
+                // Update existing
+                memoryDb.savedQuestions[existingIdx].savedAt = Date.now();
+                memoryDb.savedQuestions[existingIdx].folder = folder;
+            } else {
+                // Create new
+                memoryDb.savedQuestions.push({ _id: Date.now().toString(), userId, questionId, folder, savedAt: Date.now() }); 
+            }
+        }
         res.json({ success: true });
     } catch (e) { res.status(500).json({error: e.message}); }
 });
